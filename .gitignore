@@ -1,0 +1,21 @@
+# third-party research clones (cloned by clone_research.ps1; their own licences, not redistributed here)
+research/
+# build output, staged kit runtime, packages (the .mgu may carry a placeholder SDK; the real SDK is never redistributable)
+bmw-g20-idrive-rgb/build/
+bmw-g20-idrive-rgb/dist/
+bmw-g20-idrive-rgb/preview/
+bmw-g20-idrive-rgb/node_modules/
+# laptop tool output: reports and logs from a real car stay local
+bmw-g20-idrive-rgb/tools/laptop/out/
+# anything car-specific or secret
+*.log
+*.ppk
+*.pem
+id_rsa*
+someip-interfaces.json
+oap-sdk/
+enetdiag-*.json
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

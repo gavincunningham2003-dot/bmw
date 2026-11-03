@@ -1,0 +1,140 @@
+'use strict';
+/**
+ * mock.js - a simulated BDC body controller and the MockLightingController on top of it.
+ *
+ * MockBdc answers UDS requests BYTE FOR BYTE the way the reference documents the BDC_G05 (protocol.js), so the
+ * same encoders / decoders, the same Diag transport code (through tests/node/fake_tasu.js) and the same UI run
+ * against it as against the car. It models:
+ *   - the SGBD index (22 F1 50), SVK (22 F1 01), VIN (22 F1 90, a fake one)
+ *   - LIN layering slaves with installation locations (22 DA 5F, 22 E3 D1 read-back)
+ *   - the layering actuator (2E DA 5E / 2E E3 D1): a slave shows the colour for ZEIT seconds, then returns to OEM
+ *   - the interior-light PWM status (22 48 00) and FASTA statistics (22 23 00)
+ *   - faults to test against: needsExtendedSession (7F 2E 7F until 10 03, which lapses after s3Ms), rejectNrc,
+ *     dropNext (no reply n times), busyOnce (7F 2E 21), offline (nothing answers)
+ * Time is injectable (opts.now) so expiry can be tested without waiting.
+ */
+const P = require('./lighting_protocol');
+const { LightingController } = require('./lighting_controller');
+
+const DEFAULT_SLAVES = [0x13, 0x15, 0x17, 0x05, 0x06, 0x0C, 0x0D, 0x09, 0x10, 0x01, 0x03, 0x2B, 0x2D];   // a G20-like set of locations
+
+class MockBdc {
+    constructor(opts) {
+        const o = opts || {};
+        this.now = o.now || Date.now;
+        this.sgbdIndex = o.sgbdIndex || '0F2680';
+        this.oem = o.oem || { r: 0x90, g: 0xE0, b: 0x90 };          // "White" in the BDC's colour library
+        this.oemOn = o.oemOn !== false;
+        this.s3Ms = o.s3Ms || 5000;
+        this.needsExtendedSession = !!o.needsExtendedSession;
+        this.rejectNrc = o.rejectNrc || null;
+        this.dropNext = o.dropNext || 0;
+        this.busyOnce = !!o.busyOnce;
+        this.offline = !!o.offline;
+        this.session = 1; this.sessionAt = 0;
+        this.slaves = (o.slaves || DEFAULT_SLAVES).map((loc, i) => ({ bus: 1, nad: i + 1, locationId: loc, active: false, r: 0, g: 0, b: 0, brightness: 0, until: 0 }));
+        this.requests = [];                                          // every request seen: { target, sid, data }
+    }
+    _sessionOk() { if (this.session === 3 && this.now() - this.sessionAt > this.s3Ms) this.session = 1; return this.session === 3; }
+    /** The colour a slave shows right now (the physical LEDs), for tests and the UI preview. */
+    physical(nad) {
+        const s = this.slaves.find((x) => x.nad === nad) || this.slaves[0];
+        if (s && s.active && this.now() < s.until) return { r: s.r, g: s.g, b: s.b, source: 'custom', brightness: s.brightness };
+        return this.oemOn ? Object.assign({ source: 'oem', brightness: 100 }, this.oem) : { r: 0, g: 0, b: 0, source: 'off', brightness: 0 };
+    }
+    /** UDS request -> reply bytes (after the transport), or null for no reply. */
+    uds(target, sid, data) {
+        data = Array.prototype.slice.call(data);
+        this.requests.push({ target, sid, data: data.slice() });
+        if (this.offline) return null;
+        if (target !== P.ADDR.BDC_BODY && target !== P.ADDR.ALL) return null;
+        if (this.dropNext > 0) { this.dropNext--; return null; }
+        const neg = (nrc) => [0x7F, sid, nrc];
+        if (sid === P.SID.SESSION) {
+            if (data[0] === 0x03 || data[0] === 0x01) { this.session = data[0]; this.sessionAt = this.now(); return [0x50, data[0], 0x00, 0x32, 0x01, 0xF4]; }
+            return neg(0x12);
+        }
+        if (sid === P.SID.READ) {
+            const did = (data[0] << 8) | data[1];
+            const out = [0x62, data[0], data[1]];
+            switch (did) {
+                case P.DID.SGBD_INDEX: return out.concat([parseInt(this.sgbdIndex.slice(0, 2), 16), parseInt(this.sgbdIndex.slice(2, 4), 16), parseInt(this.sgbdIndex.slice(4, 6), 16)]);
+                case P.DID.SVK: return out.concat([1, 0, 0, 0x8B, 0x1B, 0, 1, 1, 6, 0, 0, 0x3F, 0x36, 0, 15, 2, 5, 0, 0, 0x51, 0xDD, 0, 17, 72, 8, 0, 0, 0x9A, 0x01, 0, 15, 2]);
+                case P.DID.VIN: return out.concat(Array.from('WBA0MOCK000000000').map((c) => c.charCodeAt(0)));
+                case P.DID.LIN1_LAYERING_STATUS: { const b = []; for (let i = 0; i < 26; i++) { const s = this.slaves[i]; b.push(s ? s.locationId : 0xFF); } return out.concat(b); }
+                case P.DID.LIN2_LAYERING: return out.concat([0xFF, 0, 0, 0, 0]);     // nothing on the second bus in this mock
+                case P.DID.INNENLICHT_PWM: return out.concat([0, 64, 64, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
+                case P.DID.FASTA_LIGHT: return out.concat([0, 0x12, 0x34, 0x56, 0, 0, 0x10, 0, 0, 0, 0x01, 0]).concat(this.slaves.map((s) => s.locationId));
+                default: return neg(0x31);
+            }
+        }
+        if (sid === P.SID.WRITE) {
+            const did = (data[0] << 8) | data[1];
+            if (did !== P.DID.LIN1_LAYERING_CTRL && did !== P.DID.LIN2_LAYERING) return neg(0x31);
+            if (this.needsExtendedSession && !this._sessionOk()) return neg(0x7F);
+            if (this.busyOnce) { this.busyOnce = false; return neg(0x21); }
+            if (this.rejectNrc) return neg(this.rejectNrc);
+            if (data.length !== 9) return neg(0x13);
+            const nad = data[2];
+            if (nad > 31) return neg(0x31);
+            const s = this.slaves.find((x) => x.nad === nad && x.bus === (did === P.DID.LIN2_LAYERING ? 2 : 1));
+            if (!s) return neg(0x31);
+            s.active = data[3] === 1; s.brightness = data[4]; s.r = data[5]; s.g = data[6]; s.b = data[7];
+            s.until = data[3] === 1 ? this.now() + data[8] * 1000 : 0;
+            return [0x6E, data[0], data[1]];
+        }
+        return neg(0x11);
+    }
+}
+
+/** The full LightingController on a MockBdc: the UI and its tests run on this without a car. */
+class MockLightingController extends LightingController {
+    constructor(opts) {
+        super(Object.assign({ kind: 'mock' }, opts));
+        const o = opts || {};
+        this.bdc = o.bdc instanceof MockBdc ? o.bdc : new MockBdc(Object.assign({ now: this._now }, o.bdc || {}, o.mock || {}));
+        this.online = o.online !== false;
+        this.sessionNeeded = false;
+    }
+    _available() { return this.online && !this.bdc.offline; }
+    _exchange(sid, data) {
+        this.lastRequest = P.hexBytes([sid].concat(data));
+        const r = this.bdc.uds(P.ADDR.BDC_BODY, sid, data);
+        this.lastReply = r ? P.hexBytes(r) : null;
+        return r ? Array.prototype.slice.call(r) : null;
+    }
+    async _probe() {
+        if (!this._available()) return { available: false, reason: 'mock transport offline', transport: 'mock', slaves: [], rgbActuator: 'unknown' };
+        const ident = P.decodeReply(P.SID.READ, P.DID.SGBD_INDEX, this._exchange(P.SID.READ, P.encodeRead(P.DID.SGBD_INDEX)));
+        const variant = ident.ok ? P.decodeSgbdIndex(ident.data) : null;
+        const st = P.decodeReply(P.SID.READ, P.DID.LIN1_LAYERING_STATUS, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN1_LAYERING_STATUS)));
+        const slaves = st.ok ? P.decodeLin1Status(st.data) : [];
+        return { available: true, transport: 'mock', bdcReachable: ident.ok, variant, rgbActuator: variant ? variant.rgbActuator : 'unknown', slaves, verified: { layeringWrite: 'simulated' }, notes: ['simulated BDC: nothing reaches a car'] };
+    }
+    async _readSlaves() {
+        const st = P.decodeReply(P.SID.READ, P.DID.LIN1_LAYERING_STATUS, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN1_LAYERING_STATUS)));
+        if (!st.ok) return null;
+        const known = this.slaves;
+        return P.decodeLin1Status(st.data).map((s) => Object.assign({}, known.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s));
+    }
+    async _writeSlave(slave, params) {
+        const bytes = P.encodeLayeringWrite({ bus: slave.bus, nad: slave.nad, active: params.active, brightness: params.brightness, r: params.r, g: params.g, b: params.b, seconds: params.seconds });
+        const bad = P.checkRequest(P.ADDR.BDC_BODY, P.SID.WRITE, bytes);
+        if (bad) return { ok: false, reason: 'blocked: ' + bad };
+        const did = (bytes[0] << 8) | bytes[1];
+        let reply = this._exchange(P.SID.WRITE, bytes);
+        let dec = P.decodeReply(P.SID.WRITE, did, reply);
+        if (!dec.ok && (dec.nrc === 0x7E || dec.nrc === 0x7F)) {          // not in this session: open the extended one and retry once
+            const sess = this._exchange(P.SID.SESSION, [0x03]);
+            this.sessionNeeded = true;
+            if (sess && sess[0] === 0x50) { reply = this._exchange(P.SID.WRITE, bytes); dec = P.decodeReply(P.SID.WRITE, did, reply); }
+        }
+        if (!dec.ok && dec.reason === 'no reply') dec.reason = 'timeout';
+        return Object.assign({ bytes: P.hexBytes([P.SID.WRITE].concat(bytes)) }, dec);
+    }
+    /** What the (simulated) LEDs show: the first slave's colour. */
+    physicalColour() { return this.bdc.physical(this.slaves.length ? this.slaves[0].nad : 1); }
+    status() { return Object.assign(super.status(), { lastRequest: this.lastRequest || null, lastReply: this.lastReply || null }); }
+}
+
+module.exports = { MockBdc, MockLightingController, DEFAULT_SLAVES };

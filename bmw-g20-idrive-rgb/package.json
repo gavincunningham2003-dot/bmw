@@ -1,0 +1,16 @@
+{
+  "name": "bmw-g20-idrive-rgb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BMW Ambient RGB Controller: a native iDrive 7 (MGU) app with a full colour wheel for the G20's factory ambient lighting, a LightingController abstraction with a complete mock, and a read-only ENET discovery tool.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": { "node": ">=8.7.0" },
+  "scripts": {
+    "stage": "node scripts/stage.js",
+    "test": "node scripts/stage.js && node tests/node/run_all.js",
+    "test:py": "python -m unittest discover -s tests/python -p \"test_*.py\" -v",
+    "preview": "node scripts/stage.js && node scripts/preview_frames.js",
+    "build:app": "python scripts/build_app.py"
+  }
+}

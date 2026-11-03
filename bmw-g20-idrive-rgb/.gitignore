@@ -1,0 +1,10 @@
+build/
+dist/
+preview/
+__pycache__/
+*.pyc
+*.log
+tools/laptop/out/
+*.ppk
+*.pem
+id_rsa*
