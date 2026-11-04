@@ -44,7 +44,7 @@ test('decodeReply: positive, negative, foreign, empty', () => {
 });
 test('SGBD index: known body controllers and unknown ones', () => {
     const v = P.decodeSgbdIndex([0x0F, 0x26, 0x80]);
-    assert.strictEqual(v.index, '0F2680'); assert.strictEqual(v.sgbd, 'BDC_G05'); assert.strictEqual(v.rgbActuator, 'documented');
+    assert.strictEqual(v.index, '0F2680'); assert.strictEqual(v.sgbd, 'BDC_G05'); assert.strictEqual(v.rgbActuator, 'verified');
     assert.strictEqual(P.decodeSgbdIndex([0x0F, 0x20, 0x50]).rgbActuator, 'legacy');
     const u = P.decodeSgbdIndex([0x0F, 0x99, 0x99]);
     assert.strictEqual(u.sgbd, null); assert.strictEqual(u.rgbActuator, 'unknown');

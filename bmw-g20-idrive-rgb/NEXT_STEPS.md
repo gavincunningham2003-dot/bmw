@@ -63,6 +63,15 @@ Outcomes:
 - `7F 2E 22`: conditions not correct: try with ambient lighting on/off, engine off, doors closed.
 - No reply: wait for pending (the write may poll LIN like the reads do).
 
+## 2a. Done after the verification (app 0.2.0)
+
+Fades (the controller interpolates between rounds), rainbow mode, zones from the real module map, the
+keep-alive timed from the measured round, the mock on the car's 19-module layout, the variant `0F2680`
+marked verified. `write_test.py cycle --fade 1 --all` shows a smooth fade across every module from the
+laptop (19 writes per step, about 3 steps per second). Worth one more frame on the car: **NAD 0** on
+each bus (`2E DA 5E 00 ...`), which may address every module of the bus in one write; if it does, a fade
+becomes two writes per step instead of nineteen and runs at tens of steps per second.
+
 ## 3. Engineering actions after the test
 
 | Result | Action |

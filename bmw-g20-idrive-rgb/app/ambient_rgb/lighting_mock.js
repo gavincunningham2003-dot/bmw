@@ -38,7 +38,8 @@ class MockBdc {
         this.offline = !!o.offline;
         this.session = 1; this.sessionAt = 0;
         const mk = (bus) => (loc, i) => ({ bus, nad: i + 1, locationId: loc, active: false, r: 0, g: 0, b: 0, brightness: 0, until: 0 });
-        this.slaves = (o.slaves || DEFAULT_SLAVES).map(mk(1)).concat((o.slaves2 || []).map(mk(2)));
+        const real = !o.slaves && !o.slaves2;                       // no layout given: the G20's own (19 modules)
+        this.slaves = (o.slaves || (real ? G20_SLAVES.bus1 : [])).map(mk(1)).concat((o.slaves2 || (real ? G20_SLAVES.bus2 : [])).map(mk(2)));
         this.requests = [];                                          // every request seen: { target, sid, data }
     }
     _sessionOk() { if (this.session === 3 && this.now() - this.sessionAt > this.s3Ms) this.session = 1; return this.session === 3; }

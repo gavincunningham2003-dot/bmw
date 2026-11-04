@@ -27,9 +27,9 @@ on a car**: see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md]
 
 | Path | What |
 |---|---|
-| `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `app.json` + `main.js` (UI), `colour.js`, `favourites.js`, `lighting_controller.js` (the interface + state machine), `lighting_mock.js` (simulated BDC), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_someip.js` (probe only), `lighting_protocol.js` (the bytes) |
-| `tools/laptop/` | `enetdiag`: the read-only Windows ENET discovery utility (UDS 0x22 only) + `catalog_search.py` for the MGU's SOME/IP catalog |
-| `tests/` | 66 Node tests (colour, protocol, controller, TASU path, favourites, UI) and 21 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
+| `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `app.json` + `main.js` (UI: wheel, slider, favourites, rainbow, diagnostics), `colour.js`, `favourites.js`, `lighting_controller.js` (the interface + state machine: fades, rainbow, zones, keep-alive), `lighting_mock.js` (simulated BDC with the car's 19-module layout), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_someip.js` (probe only), `lighting_protocol.js` (the bytes, verified) |
+| `tools/laptop/` | `enetdiag`: the read-only Windows ENET discovery utility (UDS 0x22 only), `write_test.py` (the gated one-frame-per-step write test, with a colour cycle and fades), `catalog_search.py` for the MGU's SOME/IP catalog |
+| `tests/` | 77 Node tests (colour, protocol, controller, transitions, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
 | `scripts/` | `stage.js` (lay the app out with the kit runtime for tests), `preview_frames.js` (PNG screenshots), `build_app.py` (the kit's real build) |
 | `docs/screens/` | screenshots rendered by the kit's own drawing code |
 | `RESEARCH.md` | every repository investigated, with commit SHAs, useful files and verdicts |

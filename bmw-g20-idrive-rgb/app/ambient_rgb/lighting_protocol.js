@@ -41,7 +41,7 @@ const DID = Object.freeze({
  * The indices come from idrive7-apps apps/live_data/builtin/sgbd_index.json (address 0x40 entries).
  */
 const VARIANTS = Object.freeze({
-    '0F2680': { sgbd: 'BDC_G05', description: 'Body Domain Controller BDC-03 (from SP18)', rgbActuator: 'documented' },
+    '0F2680': { sgbd: 'BDC_G05', description: 'Body Domain Controller BDC-03 (from SP18)', rgbActuator: 'verified' },   // verified on a G20 330e, 2026-11-04
     '0F2050': { sgbd: 'BDC_G11', description: 'Body Domain Controller (G11 generation)', rgbActuator: 'legacy' },
     '0F19C0': { sgbd: 'BDC', description: 'Body Domain Controller (early)', rgbActuator: 'legacy' },
     '0F16B0': { sgbd: 'FEM_20', description: 'Front Electronic Module (F series)', rgbActuator: 'none' },
@@ -83,6 +83,21 @@ const LOCATION = Object.freeze({
     0x47: 'Backlit trim centre console driver front', 0x48: 'Backlit trim centre console driver rear', 0x49: 'Backlit trim centre console passenger front', 0x4A: 'Backlit trim centre console passenger rear',
     0x4B: 'Cupholder front', 0x4C: 'Cupholder rear', 0xFF: 'invalid / not fitted',
 });
+
+/**
+ * Zones: which installation locations belong to which part of the cabin (the G20 330e has 19 of these modules:
+ * dashboard contour lines 13/15/17, door contour lines 05/09/0C/10, door openers 07/0E/21/22, map pockets
+ * 08/0B/0F/12, footwells 01..04). A zone name maps to a filter over slaves.
+ */
+const ZONES = Object.freeze({
+    all: () => true,
+    dash: (s) => s.locationId >= 0x13 && s.locationId <= 0x18,
+    doors: (s) => [0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x21, 0x22].indexOf(s.locationId) >= 0,
+    footwells: (s) => s.locationId >= 0x01 && s.locationId <= 0x04,
+    front: (s) => [0x01, 0x03, 0x05, 0x06, 0x07, 0x08, 0x0C, 0x0D, 0x0E, 0x0F, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18].indexOf(s.locationId) >= 0,
+    rear: (s) => [0x02, 0x04, 0x09, 0x0A, 0x0B, 0x10, 0x11, 0x12, 0x21, 0x22].indexOf(s.locationId) >= 0,
+});
+const ZONE_NAMES = Object.freeze(Object.keys(ZONES));
 
 /** TAB_INNENLICHT_FUNKTIONSMODI (BDC_G05), the modes DID 0x4804 switches for a time. */
 const MODES = Object.freeze({
@@ -245,7 +260,7 @@ function checkRequest(target, sid, data) {
 }
 
 module.exports = {
-    ADDR, SID, DID, VARIANTS, NRC, LOCATION, MODES, PWM_ELEMENTS, SVK_TYPES, WRITE_DIDS,
+    ADDR, SID, DID, VARIANTS, NRC, LOCATION, MODES, PWM_ELEMENTS, SVK_TYPES, WRITE_DIDS, ZONES, ZONE_NAMES,
     byte, hex, hex16, hexBytes, didBytes, colourByte, NO_CHANGE,
     encodeLayeringWrite, encodeBrightnessOffset, encodeModeWrite, encodeRead,
     decodeReply, decodeSgbdIndex, decodeLinStatus, decodeLin1Status, decodeLin2Status, decodePwmStatus, decodeFasta, decodeSvk, SLAVE_RECORD,

@@ -34,7 +34,7 @@ test('a tap on the wheel picks hue by angle and saturation by radius; the slider
     await h.app.ctl().shutdown();
 });
 test('Apply to lights drives the simulated BDC with the selected colour; Restore OEM lets go', async () => {
-    const h = await harness({ sets: { backend: 'mock' } });
+    const h = await harness({ sets: { backend: 'mock', fade: 0 } });
     await h.frame();
     await h.press('oem:#0020FE');                                 // library Blue
     await h.frame();
@@ -92,6 +92,31 @@ test('favourites: save on the colour page, see and pick it on the favourites pag
     assert.ok(keys(h).indexOf('fav:#783CFE') < 0);
     await h.app.ctl().shutdown();
 });
+test('rainbow and zone from the page and the settings', async () => {
+    const h = await harness({ sets: { backend: 'mock', fade: 0, zone: 'dash' } });
+    await h.frame();
+    const ctl = h.app.ctl();
+    assert.strictEqual(ctl.zone, 'dash');
+    assert.strictEqual(ctl.selected().length, 3);
+    await h.press('custom');
+    await sleep(20);
+    assert.strictEqual(ctl.bdc.physical(1, 2).source, 'custom', 'dashboard centre driven');
+    assert.strictEqual(ctl.bdc.physical(1, 1).source, 'oem', 'a door untouched');
+    await h.frame();
+    await h.press('rainbow');
+    assert.strictEqual(ctl.mode, 'rainbow');
+    await sleep(150);
+    await h.frame();
+    assert.ok(keys(h).indexOf('rainbow') >= 0);
+    await h.press('rainbow');
+    assert.strictEqual(ctl.mode, 'static');
+    h.settings.set('zone', 'all');
+    await sleep(100);
+    assert.strictEqual(ctl.selected().length, 19);
+    h.settings.set('fade', 2000);
+    assert.strictEqual(ctl.fadeMs, 2000);
+    await ctl.shutdown();
+});
 test('the diagnostics page shows the link, the variant, the slaves and the last request bytes', async () => {
     const h = await harness({ sets: { backend: 'mock' } });
     await h.frame();
@@ -103,7 +128,7 @@ test('the diagnostics page shows the link, the variant, the slaves and the last 
     const words = cv.words().length;
     assert.ok(words > 500, 'a full page');
     const s = h.app.ctl().status();
-    assert.ok(s.lastRequest.indexOf('2E DA 5E') === 0);
+    assert.ok(/^2E (DA 5E|E3 D1)/.test(s.lastRequest), s.lastRequest);
     await h.press('probe');
     assert.strictEqual(h.app.ctl().state, 'connected');
     await h.app.ctl().shutdown();

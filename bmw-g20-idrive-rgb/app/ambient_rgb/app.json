@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: a full colour wheel for the factory ambient lighting. Any colour, live, through the body controller's own light actuator; OEM control restored at a press or by itself.",
-  "version": "0.1.0",
+  "description": "BMW Ambient RGB Controller: a full colour wheel for the factory ambient lighting, with fades, a rainbow mode and zones. Any colour, live, through the body controller's own light actuator (verified on a G20); OEM control restored at a press or by itself.",
+  "version": "0.2.0",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -113,6 +113,67 @@
         50,
         75,
         100
+      ]
+    },
+    {
+      "key": "fade",
+      "label": "Fade between colours",
+      "type": "number",
+      "unit": "ms",
+      "default": 600,
+      "steps": [
+        0,
+        300,
+        600,
+        1000,
+        2000,
+        4000
+      ]
+    },
+    {
+      "key": "rainbow",
+      "label": "Rainbow: seconds per turn",
+      "type": "number",
+      "unit": "s",
+      "default": 20,
+      "steps": [
+        5,
+        10,
+        20,
+        40,
+        90
+      ]
+    },
+    {
+      "key": "zone",
+      "label": "Modules to drive",
+      "type": "choice",
+      "default": "all",
+      "options": [
+        [
+          "all",
+          "All modules"
+        ],
+        [
+          "dash",
+          "Dashboard lines"
+        ],
+        [
+          "doors",
+          "Doors"
+        ],
+        [
+          "footwells",
+          "Footwells"
+        ],
+        [
+          "front",
+          "Front"
+        ],
+        [
+          "rear",
+          "Rear"
+        ]
       ]
     },
     {

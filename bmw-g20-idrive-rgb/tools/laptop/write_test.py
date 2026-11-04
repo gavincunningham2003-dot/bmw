@@ -89,6 +89,8 @@ def main(argv=None):
     ap.add_argument("step", choices=["status", "dtc", "write", "release", "cycle"])
     ap.add_argument("--colours", default="FE0000,FE6000,FEFE00,00FE00,00FEFE,0000FE,FE00FE", help="hex colours for cycle, comma separated (max 8)")
     ap.add_argument("--hold", type=int, default=3, help="seconds per colour in cycle (1..8)")
+    ap.add_argument("--fade", type=float, default=0, help="cycle: seconds to glide between colours (0 = jump; 0.5..5)")
+    ap.add_argument("--all", action="store_true", help="cycle: every module of both buses instead of one NAD (19 writes per step)")
     ap.add_argument("--gateway")
     ap.add_argument("--port", type=int, default=6801)
     ap.add_argument("--bus", type=int, default=1, choices=[1, 2])
@@ -156,21 +158,54 @@ def main(argv=None):
                 codes = ["%02X%02X%02X status %02X" % (body[i], body[i + 1], body[i + 2], body[i + 3]) for i in range(0, len(body) - 3, 4)]
                 print("  stored faults (confirmed or pending): %s" % (", ".join(codes) if codes else "none"))
         elif a.step == "cycle":
-            did = DID_CTRL[a.bus]
             zeit = min(MAX_ZEIT, a.hold + 2)
-            print("cycle: %d colours on bus %d NAD %d, %d s each, ZEIT %d s" % (len(colours), a.bus, a.nad, a.hold, zeit))
+            targets = [(b, n) for b in (1, 2) for n in MODULES[b]] if a.all else [(a.bus, a.nad)]
+            if not 0 <= a.fade <= 5:
+                sys.exit("--fade 0..5 s")
+            print("cycle: %d colours, %d module(s), %d s each, fade %.1f s, ZEIT %d s" % (len(colours), len(targets), a.hold, a.fade, zeit))
+
+            def step(col, quiet=False):
+                for bus, nad in targets:
+                    did = DID_CTRL[bus]
+                    payload = bytes([0x2E, did >> 8, did & 0xFF, nad, 0x01, a.brightness, col[0], col[1], col[2], zeit])
+                    assert len(payload) == 10 and payload[0] == 0x2E and did in (0xDA5E, 0xE3D1)
+                    LOG.info("TX 40 <- %s", frame_text(payload))
+                    frames = c_client.request(BDC_BODY, payload, overall_ms=3000, quiet_ms=300,
+                                              until=lambda f: f.src == BDC_BODY and (f.payload[:1] == b"\x6E" or (len(f.payload) >= 3 and f.payload[0] == 0x7F and f.payload[1] == 0x2E)))
+                    reply = next((f.payload for f in frames if f.src == BDC_BODY), None)
+                    LOG.info("RX 40 -> %s", frame_text(reply) if reply else "no reply")
+                    if not reply or reply[0] != 0x6E:
+                        print("  bus %d NAD %d: %s" % (bus, nad, explain(reply, 0x2E)))
+                        return False
+                return True
+
+            prev = None
+            t_round = None
             for i, col in enumerate(colours):
-                payload = bytes([0x2E, did >> 8, did & 0xFF, a.nad, 0x01, a.brightness, col[0], col[1], col[2], zeit])
-                assert len(payload) == 10 and payload[0] == 0x2E and did in (0xDA5E, 0xE3D1)
                 print("colour %d/%d #%s" % (i + 1, len(colours), col.hex().upper()))
-                reply = send(c_client, payload)
-                print("  " + explain(reply, 0x2E))
-                if not reply or reply[0] != 0x6E:
-                    print("  stopping the cycle")
-                    return 2
+                if a.fade > 0 and prev is not None:
+                    # glide: as many in-between steps as the module count allows at ~14 ms per write
+                    t0 = time.monotonic()
+                    while True:
+                        t = min(1.0, (time.monotonic() - t0) / a.fade)
+                        mid = bytes(int(round(prev[k] + (col[k] - prev[k]) * t)) for k in range(3))
+                        ts = time.monotonic()
+                        if not step(mid):
+                            print("  stopping the cycle")
+                            return 2
+                        t_round = time.monotonic() - ts
+                        if t >= 1.0:
+                            break
+                else:
+                    ts = time.monotonic()
+                    if not step(col):
+                        print("  stopping the cycle")
+                        return 2
+                    t_round = time.monotonic() - ts
+                prev = col
                 if i < len(colours) - 1:
                     time.sleep(a.hold)
-            print("done: the module returns to OEM by itself within %d s" % zeit)
+            print("done (last round %d ms for %d module(s)); the modules return to OEM by themselves within %d s" % (int((t_round or 0) * 1000), len(targets), zeit))
         elif a.step in ("write", "release"):
             did = DID_CTRL[a.bus]
             if a.step == "write":

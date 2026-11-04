@@ -88,7 +88,7 @@ class BdcUdsLightingController extends LightingController {
         if (st2.ok) { const s2 = P.decodeLin2Status(st2.data); caps.slaves = caps.slaves.concat(s2); caps.verified.lin2Status = true; caps.lin2 = s2; } else caps.notes.push('22 E3 D1: ' + st2.reason);
         const pwm = await this._read(P.DID.INNENLICHT_PWM);
         if (pwm.ok) caps.pwm = P.decodePwmStatus(pwm.data);
-        if (caps.rgbActuator !== 'documented' && !this.allowUnknownVariant) caps.notes.push('writes disabled: body controller variant is ' + caps.rgbActuator + ' for the RGB layering actuator');
+        if (caps.rgbActuator !== 'documented' && caps.rgbActuator !== 'verified' && !this.allowUnknownVariant) caps.notes.push('writes disabled: body controller variant is ' + caps.rgbActuator + ' for the RGB layering actuator');
         if (!this.armed) caps.notes.push('not armed: writes are dry runs');
         return caps;
     }
@@ -105,7 +105,7 @@ class BdcUdsLightingController extends LightingController {
         if (!base.ok) return base;
         if (!this.slavesFromCar) return { ok: false, reason: 'slave list not read from the car' };
         const rgb = this.capabilities && this.capabilities.rgbActuator;
-        if (rgb !== 'documented' && !this.allowUnknownVariant) return { ok: false, reason: 'body controller variant not documented with an RGB actuator (' + rgb + ')' };
+        if (rgb !== 'documented' && rgb !== 'verified' && !this.allowUnknownVariant) return { ok: false, reason: 'body controller variant not documented with an RGB actuator (' + rgb + ')' };
         return { ok: true };
     }
 

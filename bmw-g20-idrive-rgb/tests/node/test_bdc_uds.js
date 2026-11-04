@@ -3,7 +3,7 @@ const path = require('path');
 const { test, run, assert, tick } = require('./t');
 const { JS } = require('../../scripts/stage');
 const { bus } = require('./fake_tasu');
-const { MockBdc } = require(path.join(JS, 'lighting_mock'));
+const { MockBdc, DEFAULT_SLAVES } = require(path.join(JS, 'lighting_mock'));
 const { BdcUdsLightingController } = require(path.join(JS, 'lighting_bdc_uds'));
 const P = require(path.join(JS, 'lighting_protocol'));
 
@@ -11,9 +11,9 @@ const FOREIGN = [0x62, 0xF4, 0x0C, 0x0B, 0xB8];   // another app's coolant read 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function make(mock, opts, busOpts) {
-    const bdc = new MockBdc(mock || {});
+    const bdc = new MockBdc(Object.assign({ slaves: DEFAULT_SLAVES, slaves2: [] }, mock || {}));
     const b = bus(JS, bdc, Object.assign({ foreign: [FOREIGN] }, busOpts || {}));
-    const c = new BdcUdsLightingController(Object.assign({ diag: b.diag, diagModule: b.diagModule, refreshSeconds: 10, minGapMs: 0, timeoutMs: 300 }, opts || {}));
+    const c = new BdcUdsLightingController(Object.assign({ diag: b.diag, diagModule: b.diagModule, refreshSeconds: 10, minGapMs: 0, timeoutMs: 300, fadeMs: 0 }, opts || {}));
     return { c, bdc, b };
 }
 const writes = (bdc) => bdc.requests.filter((r) => r.sid === 0x2E);
@@ -25,7 +25,7 @@ test('probe over the (fake) TASU link: SGBD index, SVK, slaves from DA5F, PWM; f
     assert.strictEqual(c.state, 'connected');
     assert.strictEqual(caps.transport, 'tasu');
     assert.strictEqual(caps.variant.index, '0F2680');
-    assert.strictEqual(caps.rgbActuator, 'documented');
+    assert.strictEqual(caps.rgbActuator, 'verified');
     assert.strictEqual(caps.slaves.length, 13);
     assert.ok(caps.svk.some((r) => r.type === 'BTLD'));
     assert.strictEqual(caps.pwm.length, 13);
@@ -80,11 +80,11 @@ test('an undocumented body controller variant blocks writes unless allowUnknownV
     await c2.disableCustom();
 });
 test('no slaves from the car: refused', async () => {
-    const bdc = new MockBdc({});
+    const bdc = new MockBdc({ slaves: DEFAULT_SLAVES, slaves2: [] });
     const real = bdc.uds.bind(bdc);
     bdc.uds = (t, sid, d) => (sid === 0x22 && d[0] === 0xDA && d[1] === 0x5F ? [0x7F, 0x22, 0x31] : real(t, sid, d));
     const b = bus(JS, bdc, {});
-    const c = new BdcUdsLightingController({ diag: b.diag, diagModule: b.diagModule, armed: true, minGapMs: 0, timeoutMs: 300 });
+    const c = new BdcUdsLightingController({ diag: b.diag, diagModule: b.diagModule, armed: true, minGapMs: 0, timeoutMs: 300, fadeMs: 0 });
     await c.init(); await c.connect();
     assert.strictEqual(c.state, 'connected');
     const r = await c.enableCustom();

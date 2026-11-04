@@ -22,6 +22,7 @@ const { Favourites } = require('./favourites');
 const { MockLightingController } = require('./lighting_mock');
 const { BdcUdsLightingController } = require('./lighting_bdc_uds');
 const { SomeIpLightingController } = require('./lighting_someip');
+const { ZONES } = require('./lighting_protocol');
 
 const PAGES = ['Colour', 'Favourites', 'Diagnostics'];
 const WHEEL = { size: 400, x: 70, y: 70 };                   // page px; ramped arcs in a cached layer (no pixel images: those need one renderer dialect only)
@@ -63,7 +64,7 @@ mgu.run({
         /* ---------- the lighting controller for the chosen link ---------- */
         async function makeController() {
             if (ctl) { try { await ctl.shutdown(); } catch (e) { /* */ } ctl.removeAllListeners(); }
-            const common = { log, refreshSeconds: Number(settings.get('refresh')) || 10, brightness: Number(settings.get('brightness')) || 100 };
+            const common = { log, refreshSeconds: Number(settings.get('refresh')) || 10, brightness: Number(settings.get('brightness')) || 100, fadeMs: Number(settings.get('fade')) || 0, rainbowPeriodS: Number(settings.get('rainbow')) || 20 };
             const backend = settings.get('backend');
             if (backend === 'bdc') {
                 ctl = new BdcUdsLightingController(Object.assign(common, { signals: ctx.signals, armed: settings.get('arm') === 'on', allowUnknownVariant: settings.get('unknownVariant') === 'on' }));
@@ -77,6 +78,7 @@ mgu.run({
             ctl.on('refused', (why) => say('Cannot enable: ' + why, 4000));
             ctl.on('state', (s, err) => { if (s === 'disconnected' && err) say('Link: ' + err, 4000); });
             ctl.setColour(colour());
+            ctl.setZone(settings.get('zone') || 'all', ZONES[settings.get('zone')] || null);
             probing = true;
             await ctl.connect();
             probing = false;
@@ -100,6 +102,9 @@ mgu.run({
             if (r.ok) say('Custom control on' + (ctl.armed === false ? ' (dry run: not armed)' : ''));
         }
         async function restoreOem() { await ctl.restoreOem(); say('OEM lighting restored'); }
+        function toggleRainbow() {
+            if (ctl.mode === 'rainbow') { ctl.setMode('static'); setHsv(hsv, 'rainbow off'); say('Rainbow off'); } else { ctl.setMode('rainbow'); say('Rainbow: a full turn every ' + ctl.rainbowPeriodS + ' s'); }
+        }
 
         /* ---------- settings ---------- */
         let lastBackend = settings.get('backend') + '|' + settings.get('arm') + '|' + settings.get('unknownVariant');
@@ -107,7 +112,10 @@ mgu.run({
             const now = settings.get('backend') + '|' + settings.get('arm') + '|' + settings.get('unknownVariant');
             if (now !== lastBackend) { lastBackend = now; await makeController(); say('Lighting link: ' + ctl.kind); }
             if (key === 'refresh' || !key) ctl.refreshSeconds = Math.max(2, Math.min(254, Number(settings.get('refresh')) || 10));
-            if (key === 'brightness' || !key) ctl.setColour(colour(), { brightness: Number(settings.get('brightness')) || 100 });
+            if (key === 'brightness' || !key) ctl.setColour(colour(), { brightness: Number(settings.get('brightness')) || 100, fadeMs: 0 });
+            if (key === 'fade' || !key) ctl.fadeMs = Number(settings.get('fade')) || 0;
+            if (key === 'rainbow' || !key) ctl.rainbowPeriodS = Number(settings.get('rainbow')) || 20;
+            if (key === 'zone' || !key) ctl.setZone(settings.get('zone') || 'all', ZONES[settings.get('zone')] || null);
             if (key === 'hue' || key === 'sat' || key === 'val') {
                 setHsv({ h: Number(settings.get('hue')), s: Number(settings.get('sat')) / 100, v: Number(settings.get('val')) / 100 }, 'settings');
             }
@@ -221,7 +229,9 @@ mgu.run({
             ax += G.button(cv, t, ax, ay, 0, 52, ctl.custom ? 'Custom off' : 'Apply to lights', toggleCustom, { primary: !ctl.custom, key: 'custom' }) + 12;
             ax += G.button(cv, t, ax, ay, 0, 52, 'Restore OEM', restoreOem, { key: 'oem' }) + 12;
             ax += G.button(cv, t, ax, ay, 0, 52, favs.has(hex) ? 'Saved' : 'Save favourite', () => { if (favs.add(hex)) say('Saved ' + hex); }, { key: 'save', busy: favs.has(hex) }) + 12;
-            const note = ctl.kind === 'bdc-uds' && !ctl.armed ? 'Disarmed: writes are logged, not sent (Settings > Write to the car)' : ctl.kind === 'mock' ? 'Simulated body controller: nothing reaches the car (Settings > Lighting link)' : ctl.lastError ? String(ctl.lastError) : 'Keep-alive every ' + Math.round(ctl.refreshSeconds * ctl.keepAliveFactor) + ' s, ZEIT ' + ctl.refreshSeconds + ' s';
+            ax += G.button(cv, t, ax, ay, 0, 52, ctl.mode === 'rainbow' ? 'Rainbow off' : 'Rainbow', toggleRainbow, { key: 'rainbow', color: ctl.mode === 'rainbow' ? t.warn : undefined }) + 12;
+            const zoneText = ctl.zone === 'all' ? 'all ' + ctl.slaves.length + ' modules' : ctl.zone + ' (' + ctl.selected().length + ' of ' + ctl.slaves.length + ')';
+            const note = ctl.kind === 'bdc-uds' && !ctl.armed ? 'Disarmed: writes are logged, not sent (Settings > Write to the car)' : ctl.kind === 'mock' ? 'Simulated body controller: nothing reaches the car (Settings > Lighting link)' : ctl.lastError ? String(ctl.lastError) : 'Zone: ' + zoneText + ', fade ' + ctl.fadeMs + ' ms, round ' + (ctl.stats.avgRoundMs == null ? '-' : ctl.stats.avgRoundMs + ' ms') + ', ZEIT ' + ctl.refreshSeconds + ' s';
             cv.text(note, P.x + 24, P.y + 420, 17, t.dim);
             if (parked && parked.moving()) G.pill(cv, t, P.x + P.w - 150, P.y + 400, 126, 30, 'DRIVING', { color: t.warn, size: 15 });
         }
@@ -259,7 +269,8 @@ mgu.run({
                 ['RGB actuator', caps.rgbActuator || '-'],
                 ['LIN slaves', String(s.slaves.length) + (caps.verified && caps.verified.lin1Status ? ' (from the car)' : s.kind === 'mock' ? ' (simulated)' : '')],
                 ['Writes', s.stats.writes + ' sent, ' + s.stats.accepted + ' accepted, ' + s.stats.rejected + ' rejected, ' + s.stats.timeouts + ' timeouts'],
-                ['Keep-alive', 'ZEIT ' + s.refreshSeconds + ' s, resend every ' + Math.round(s.refreshSeconds * ctl.keepAliveFactor) + ' s, last round ' + (s.stats.lastRoundMs == null ? '-' : s.stats.lastRoundMs + ' ms')],
+                ['Keep-alive', 'ZEIT ' + s.refreshSeconds + ' s, keep-alive at ' + Math.round(s.refreshSeconds * ctl.keepAliveFactor) + ' s minus the round; round ' + (s.stats.avgRoundMs == null ? '-' : s.stats.avgRoundMs + ' ms avg, ' + s.stats.lastRoundMs + ' ms last')],
+                ['Zone / mode', s.zone + ' (' + s.selected + ' modules), ' + s.mode + (s.fading ? ', fading' : '') + ', fade ' + s.fadeMs + ' ms'],
                 ['Last request', s.lastRequest || (s.history.length ? s.history[s.history.length - 1].bytes || '-' : '-')],
                 ['Last reply', s.lastReply || '-'],
             ];
@@ -267,7 +278,7 @@ mgu.run({
             G.panel(cv, t, 800, 60, 780, 220, 'Control paths');
             const approaches = [
                 ['SOME/IP lighting service', 'unknown: not in any public source; search the unit catalog'],
-                ['BDC actuator 2E DA5E (TASU)', caps.rgbActuator === 'documented' ? (s.stats.accepted && s.kind === 'bdc-uds' && s.armed ? 'ACCEPTED by this car' : 'documented for BDC_G05; unverified on this car') : s.kind === 'mock' ? 'simulated' : 'variant ' + (caps.rgbActuator || 'unknown')],
+                ['BDC actuator 2E DA5E / E3D1', caps.rgbActuator === 'verified' ? 'verified on this car over ENET (2026-11-04)' + (s.stats.accepted && s.kind === 'bdc-uds' && s.armed ? '; accepted over TASU' : '') : caps.rgbActuator === 'documented' ? 'documented for this variant; unverified' : s.kind === 'mock' ? 'simulated' : 'variant ' + (caps.rgbActuator || 'unknown')],
                 ['BDC coding 360A (persistent)', 'not used: needs recoding per change'],
             ];
             G.table(cv, t, 816, 100, 750, [{ w: 300, title: '' }, { w: 450, title: '' }], approaches, { rowH: 34, size: 18 });
@@ -281,10 +292,11 @@ mgu.run({
 
         ctx.loop('MAIN', 10, () => {
             const t = ctx.theme();
+            if (ctl.mode === 'rainbow' && ctl.driven) { const d = C.rgbToHsv(ctl.driven); hsv = { h: d.h, s: hsv.s, v: hsv.v }; }
             const cv = ctx.canvas(1600, 520).clear(t.bg);
             const badges = [];
             if (ctl.kind === 'mock') badges.push({ text: 'SIM' });
-            if (ctl.custom) badges.push({ text: ctl.kind === 'bdc-uds' && !ctl.armed ? 'DRY RUN' : 'CUSTOM' });
+            if (ctl.custom) badges.push({ text: ctl.kind === 'bdc-uds' && !ctl.armed ? 'DRY RUN' : ctl.mode === 'rainbow' ? 'RAINBOW' : 'CUSTOM' });
             G.frame(cv, t, PAGES, page, badges);
             if (page === 0) drawColour(cv, t); else if (page === 1) drawFavourites(cv, t); else drawDiagnostics(cv, t);
             if (flash && Date.now() < flash.until) {

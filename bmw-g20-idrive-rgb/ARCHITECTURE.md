@@ -57,15 +57,23 @@ accepts is exactly what the car will be asked.
 
 ### Custom control as a loop, not a setting
 
-The documented actuator holds a slave for `ZEIT` seconds and then releases it. The app therefore does
-not "set" a colour; it **keeps driving** every slave with the current colour, re-sending at half the
-timeout (default ZEIT 10 s, resend every 5 s, cap 30 s). Consequences:
+The actuator holds a module for `ZEIT` seconds and then releases it (verified: PROTOCOL_FINDINGS §0.1).
+The app therefore does not "set" a colour; it **keeps driving** every selected module with the colour
+to show now, in rounds. Consequences, with the numbers measured on the car (14 ms per write over ENET,
+19 modules, so a round is about 0.3 s):
 
-- a change of colour is one round of writes (13 slaves × one request); on the car, one TASU request
-  takes tens of milliseconds to a few hundred, so a round is roughly 0.5 to 2 s: "real time" means a
-  sweep settles within a second or two, not per frame. Changes are coalesced (newest wins, 150 ms gap);
+- **a colour change is a transition**: the rounds run back to back and each writes the colour
+  interpolated between where the lights are and the target (setting *Fade between colours*, 600 ms by
+  default, 0 = jump). A fade therefore has about three steps per second across the whole cabin, more
+  on a single zone; the old "jump" was one write per colour;
+- **rainbow mode** is a transition that never ends: the hue turns once per *Rainbow: seconds per turn*;
+- **zones** (*Modules to drive*: all, dashboard lines, doors, footwells, front, rear) limit the rounds
+  to those modules; modules that leave the zone are released once (`ZUSTAND 0`) and stay OEM;
+- between transitions the loop sleeps until the **keep-alive**, due at `ZEIT × 0.5` minus the time the
+  last round took, so a slow transport can never let a module lapse (default ZEIT 10 s);
 - if the app crashes, the head unit restarts, or the link drops, the lights return to OEM within ZEIT;
-- *Restore OEM* writes `ZUSTAND 0, ZEIT 0` to every slave and stops the loop;
+- *Custom off* / *Restore OEM* writes `ZUSTAND 0, ZEIT 0` to every driven module (instant, verified)
+  and stops the loop;
 - nothing persistent is touched: no coding, no settings in the BDC, no flash.
 
 ### Factory controls stay authoritative

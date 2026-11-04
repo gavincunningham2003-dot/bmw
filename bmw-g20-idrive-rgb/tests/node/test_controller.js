@@ -2,14 +2,14 @@
 const path = require('path');
 const { test, run, assert, fakeClock, tick } = require('./t');
 const { JS } = require('../../scripts/stage');
-const { MockLightingController, MockBdc } = require(path.join(JS, 'lighting_mock'));
+const { MockLightingController, MockBdc, DEFAULT_SLAVES } = require(path.join(JS, 'lighting_mock'));
 const P = require(path.join(JS, 'lighting_protocol'));
 
 const writes = (c) => c.bdc.requests.filter((r) => r.sid === 0x2E);
 function make(mock, opts) {
     const clock = fakeClock();
-    const bdc = new MockBdc(Object.assign({ now: clock.now }, mock || {}));
-    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, minGapMs: 150 }, opts || {}));
+    const bdc = new MockBdc(Object.assign({ now: clock.now, slaves: DEFAULT_SLAVES, slaves2: [] }, mock || {}));
+    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, minGapMs: 150, fadeMs: 0 }, opts || {}));
     return { c, bdc, clock };
 }
 
@@ -187,6 +187,7 @@ test('restart: a new controller starts in OEM control with nothing remembered', 
     await c.connect();
     c.setColour({ r: 9, g: 9, b: 9 });
     await c.enableCustom();
+    await c.shutdown();
     const { c: fresh } = make();
     await fresh.connect();
     assert.strictEqual(fresh.custom, false);
