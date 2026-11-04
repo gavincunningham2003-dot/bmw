@@ -4,8 +4,8 @@
 
 | Done | Not done |
 |---|---|
-| The app, the controller with the keep-alive loop, the simulated BDC (now with the car's own 19-module layout), the gated TASU path, the read-only laptop tool, 90 tests, the package built by the kit's own build | root SSH on the MGU, the platform and app install, the real SDK, the catalog search, **one accepted `2E DA5E`** |
-| **Read-only car data (§1): the BDC is BDC_G05, 19 RGB modules on two LIN buses with locations and a working colour read-back (all on Violet)** | the write: session or security needs, the visual effect, the OEM-off interaction |
+| The app 0.3.0 (preview/apply, dual colour, zones, modes, the write scheduler), the simulated BDC with the car's own 19-module layout, the gated TASU path, the read-only laptop tool, 87 Node + 24 Python tests, the package built by the kit's own build | root SSH on the MGU, the platform and app install, the real SDK, the catalog search, the app running on the head unit |
+| **The car (§1, §1a): BDC_G05, 19 RGB modules on two LIN buses with locations and colour read-back; `2E DA5E` / `E3D1` accepted in the default session, visible, self-reverting, no fault stored** | TASU latency on the head unit, brightness levels other than 100, NAD 0 (not assumed broadcast) |
 
 ## 1. What the car has told us (read-only, done)
 
@@ -68,9 +68,19 @@ Outcomes:
 Fades (the controller interpolates between rounds), rainbow mode, zones from the real module map, the
 keep-alive timed from the measured round, the mock on the car's 19-module layout, the variant `0F2680`
 marked verified. `write_test.py cycle --fade 1 --all` shows a smooth fade across every module from the
-laptop (19 writes per step, about 3 steps per second). Worth one more frame on the car: **NAD 0** on
-each bus (`2E DA 5E 00 ...`), which may address every module of the bus in one write; if it does, a fade
-becomes two writes per step instead of nineteen and runs at tens of steps per second.
+laptop (19 writes per step, about 3 steps per second). An optional experiment for one frame on the car: **NAD 0** on each bus (`2E DA 5E 00 ...`). It is NOT
+assumed to be a broadcast: the LIN broadcast address is 0x7F, and the BDC's NAD 0..31 argument range proves
+nothing. If it did address every module of a bus, a frame would be two writes instead of nineteen.
+
+## 2b. App 0.3.0 (feature branch): the full application
+
+Preview/applied separation, the rotary editor, the circular brightness dial, Dual Colour (upper / lower with
+their own brightness, handles configurable), independent zones, the six modes, saved configurations, the
+write scheduler (coalescing, priorities, obsolete frames dropped, busy retried, honest restore), the parking
+fail-closed rule. All verified in simulation (87 Node tests); on the car only the underlying actuator is
+verified. Still to measure on the head unit: the TASU latency per write (the 14 ms is over ENET), which
+sets the Colour Wave frame rate (3.8 frames/s at 14 ms in simulation; the Modes page says whether the
+measured link is fast enough). Brightness values other than 100 have not been shown on the car.
 
 ## 3. Engineering actions after the test
 
@@ -91,7 +101,7 @@ becomes two writes per step instead of nineteen and runs at tens of steps per se
 
 ## 5. Known limits
 
-- "Real time" is one round of 19 writes per change (likely 1-3 s on the car); no per-frame fades.
+- A cabin-wide frame is 19 writes, one at a time (266 ms at the 14 ms measured over ENET; the head unit's own latency is unmeasured). Animated modes are paced to that; Colour Wave needs a few frames a second.
 - The BDC's own PWM channels (`LCI_0` at 89 %, `MSA_LED` 92 %) are not RGB modules; `DA5E`/`E3D1` do
   not reach them. Whether any visible zone is on them is unknown (all the obvious zones are LIN modules).
 - The knob needs the controller gate; the wheel's taps need the touch-routing renderer.

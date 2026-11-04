@@ -7,7 +7,12 @@ async function run(label) {
     let pass = 0, fail = 0;
     const mine = cases.splice(0, cases.length);            // this file's cases only
     for (const c of mine) {
-        try { await c.fn(); pass++; console.log('  ok   ' + c.name); } catch (e) { fail++; console.log('  FAIL ' + c.name + '\n       ' + String(e && e.stack || e).split('\n').slice(0, 4).join('\n       ')); }
+        try {
+            let watchdog;
+            await Promise.race([c.fn(), new Promise((_, rej) => { watchdog = setTimeout(() => rej(new Error('TIMEOUT after 15 s (a promise never resolved: a fake timer not advanced?)')), 15000); })]);
+            clearTimeout(watchdog);
+            pass++; console.log('  ok   ' + c.name);
+        } catch (e) { fail++; console.log('  FAIL ' + c.name + '\n       ' + String(e && e.stack || e).split('\n').slice(0, 4).join('\n       ')); }
     }
     console.log((label || 'tests') + ': ' + pass + ' passed, ' + fail + ' failed');
     return { pass, fail };
@@ -23,16 +28,19 @@ function fakeClock(start) {
         pending: () => timers.size,
         async advance(ms) {
             const end = now + ms;
+            const yield_ = () => new Promise((r) => setImmediate(r));
+            const due = () => { let next = null; timers.forEach((t, id) => { if (t.at <= end && (!next || t.at < next.t.at)) next = { id, t }; }); return next; };
+            await yield_();                                   // work queued on microtasks (an apply() in flight) registers its timers first
             for (;;) {
-                let next = null;
-                timers.forEach((t, id) => { if (t.at <= end && (!next || t.at < next.t.at)) next = { id, t }; });
-                if (!next) break;
+                let next = due();
+                if (!next) { await yield_(); next = due(); if (!next) break; }
                 now = Math.max(now, next.t.at); timers.delete(next.id);
                 await next.t.fn();
-                await new Promise((r) => setImmediate(r));
+                await yield_();
             }
             now = end;
-            await new Promise((r) => setImmediate(r));
+            await yield_();
+            await yield_();
         },
     };
 }

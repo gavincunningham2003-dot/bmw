@@ -2,273 +2,247 @@
 const path = require('path');
 const { test, run, assert, fakeClock, tick } = require('./t');
 const { JS } = require('../../scripts/stage');
-const { MockLightingController, MockBdc, DEFAULT_SLAVES } = require(path.join(JS, 'lighting_mock'));
+const { MockLightingController, MockBdc } = require(path.join(JS, 'lighting_mock'));
 const P = require(path.join(JS, 'lighting_protocol'));
 
 const writes = (c) => c.bdc.requests.filter((r) => r.sid === 0x2E);
+const phys = (c, key) => { const p = c.physicalColour(key); return [p.r, p.g, p.b, p.brightness, p.source]; };
 function make(mock, opts) {
     const clock = fakeClock();
-    const bdc = new MockBdc(Object.assign({ now: clock.now, slaves: DEFAULT_SLAVES, slaves2: [] }, mock || {}));
-    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, minGapMs: 150, fadeMs: 0 }, opts || {}));
+    const bdc = new MockBdc(Object.assign({ now: clock.now }, mock || {}));          // the car's 19 modules
+    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient' }, opts || {}));
     return { c, bdc, clock };
 }
+const SOLID = { mode: 'solid', colour: { r: 254, g: 0, b: 0 }, brightness: 100, zone: 'all' };
+/** apply() on a mock with latency needs the fake clock to move while it waits for the transport */
+async function applyAdv(c, clock, program, ms) { const p = c.apply(program); await clock.advance(ms || 2000); return p; }
+const DUAL = { mode: 'dual', top: { colour: { r: 160, g: 60, b: 254 }, brightness: 80 }, bottom: { colour: { r: 90, g: 200, b: 254 }, brightness: 45 }, handlesTo: 'bottom' };
 
-test('connect probes the BDC: variant, slaves; state connected', async () => {
+test('connect probes the BDC: variant, 19 modules on two buses; nothing is written', async () => {
     const { c } = make();
     const caps = await c.connect();
     assert.strictEqual(c.state, 'connected');
     assert.strictEqual(caps.variant.sgbd, 'BDC_G05');
-    assert.strictEqual(c.slaves.length, 13);
-    assert.strictEqual(c.slaves[0].location, 'Contour line dashboard driver');
-    assert.strictEqual(c.custom, false, 'starts in OEM control');
+    assert.strictEqual(c.slaves.length, 19);
+    assert.strictEqual(c.custom, false);
+    assert.strictEqual(writes(c).length, 0);
 });
-test('setColour without custom control writes nothing; the preview is only remembered', async () => {
+test('nothing reaches a module until apply(): browsing is the UI\'s business', async () => {
     const { c } = make();
     await c.connect();
-    c.setColour({ r: 1, g: 2, b: 3 });
     assert.strictEqual(writes(c).length, 0);
-    assert.deepStrictEqual(c.colour, { r: 1, g: 2, b: 3 });
-    assert.strictEqual(c.physicalColour().source, 'oem');
+    assert.strictEqual(c.program, null);
+    assert.strictEqual(phys(c, '2:1')[4], 'oem');
 });
-test('enableCustom writes every slave with the colour and ZEIT, then the lights show it', async () => {
+test('apply(solid) writes every module once with the colour and ZEIT, reports the count, then only keep-alives', async () => {
+    const { c, clock } = make();
+    await c.connect();
+    const r = await c.apply(SOLID);
+    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, released: 0 });
+    assert.strictEqual(writes(c).length, 19);
+    assert.deepStrictEqual(writes(c)[0].data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 0, 10]);
+    assert.deepStrictEqual(phys(c, '2:1'), [254, 0, 0, 100, 'custom']);
+    assert.strictEqual(c.custom, true);
+    await clock.advance(4000);
+    assert.strictEqual(writes(c).length, 19, 'no writes while nothing changes and nothing is stale');
+    await clock.advance(2000);
+    assert.strictEqual(writes(c).length, 38, 'the keep-alive refreshed every module once their write was 5 s old');
+    assert.strictEqual(c.stats.keepAlives, 1);
+    await clock.advance(5000);
+    assert.strictEqual(writes(c).length, 57);
+    assert.strictEqual(phys(c, '2:1')[4], 'custom', 'never lapsed');
+});
+test('dual: upper and lower colours and brightness on the right modules, handles as configured', async () => {
+    const { c } = make();
+    await c.connect();
+    const r = await c.apply(DUAL);
+    assert.strictEqual(r.written, 19);
+    assert.deepStrictEqual(phys(c, '2:1'), [160, 60, 254, 80, 'custom'], 'dashboard centre: upper');
+    assert.deepStrictEqual(phys(c, '1:3'), [160, 60, 254, 80, 'custom'], 'door contour line: upper');
+    assert.deepStrictEqual(phys(c, '2:4'), [90, 200, 254, 45, 'custom'], 'footwell: lower');
+    assert.deepStrictEqual(phys(c, '1:1'), [90, 200, 254, 45, 'custom'], 'map pocket: lower');
+    assert.deepStrictEqual(phys(c, '1:2'), [90, 200, 254, 45, 'custom'], 'handle: lower as configured');
+    const r2 = await c.apply(Object.assign({}, DUAL, { handlesTo: 'off' }));
+    assert.strictEqual(r2.released, 4, 'the four handles handed back');
+    assert.strictEqual(phys(c, '1:2')[4], 'oem');
+    assert.strictEqual(c.driven.size, 15);
+});
+test('changing one zone keeps the others: a zones program', async () => {
+    const { c } = make();
+    await c.connect();
+    await c.apply({ mode: 'zones', assignments: [{ zone: 'all', colour: { r: 1, g: 1, b: 1 }, brightness: 50 }] });
+    await c.apply({ mode: 'zones', assignments: [{ zone: 'all', colour: { r: 1, g: 1, b: 1 }, brightness: 50 }, { zone: 'footwells', colour: { r: 9, g: 9, b: 9 }, brightness: 20 }] });
+    assert.deepStrictEqual(phys(c, '2:4'), [9, 9, 9, 20, 'custom']);
+    assert.deepStrictEqual(phys(c, '2:1'), [1, 1, 1, 50, 'custom']);
+    assert.strictEqual(writes(c).length, 19 + 19, 'the second apply forced a full round (apply always refreshes)');
+});
+test('restoreOem releases every driven module with ZUSTAND 0 and reports exactly what happened', async () => {
+    const { c, clock } = make();
+    await c.connect();
+    await c.apply(SOLID);
+    const r = await c.restoreOem();
+    assert.deepStrictEqual(r, { ok: true, released: 19, failed: [], pending: 0, reason: undefined });
+    const rel = writes(c).slice(-19);
+    assert.ok(rel.every((w) => w.data[3] === 0 && w.data[8] === 0));
+    assert.strictEqual(phys(c, '2:1')[4], 'oem');
+    assert.strictEqual(c.program, null);
+    assert.strictEqual(c.driven.size, 0);
+    const n = writes(c).length;
+    await clock.advance(30000);
+    assert.strictEqual(writes(c).length, n, 'no keep-alives after restore');
+    assert.strictEqual(clock.pending(), 0, 'no timers left');
+});
+test('restoreOem never claims success when a release was refused', async () => {
     const { c, bdc } = make();
     await c.connect();
-    c.setColour({ r: 255, g: 0, b: 128 });
-    const r = await c.enableCustom();
-    assert.strictEqual(r.ok, true);
-    const w = writes(c);
-    assert.strictEqual(w.length, 13);
-    assert.deepStrictEqual(w[0].data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 128, 10], '255 goes out as FE: FF would mean no change');
-    assert.strictEqual(bdc.physical(7).source, 'custom');
-    assert.deepStrictEqual([bdc.physical(7).r, bdc.physical(7).g, bdc.physical(7).b], [254, 0, 128]);
-});
-test('keep-alive: the colour is re-sent before ZEIT lapses, so the lights never fall back while custom is on', async () => {
-    const { c, bdc, clock } = make();
-    await c.connect();
-    c.setColour({ r: 10, g: 20, b: 30 });
-    await c.enableCustom();
-    assert.strictEqual(c.stats.rounds, 1);
-    await clock.advance(5100);                                  // ZEIT 10 s * 0.5
-    assert.strictEqual(c.stats.rounds, 2, 'a second round after half ZEIT');
-    await clock.advance(5100);
-    assert.strictEqual(c.stats.rounds, 3);
-    assert.strictEqual(bdc.physical(1).source, 'custom', 'still custom after 10 s');
-    await clock.advance(30000);
-    assert.ok(c.stats.rounds >= 8);
-    assert.strictEqual(bdc.physical(1).source, 'custom');
-});
-test('without the keep-alive (app gone) the BDC returns to OEM after ZEIT: the design is reversible', async () => {
-    const { c, bdc, clock } = make();
-    await c.connect();
-    c.setColour({ r: 10, g: 20, b: 30 });
-    await c.enableCustom();
-    c._stopTimer(); c._gen++;                                   // the app died
-    assert.strictEqual(bdc.physical(1).source, 'custom');
-    await clock.advance(10001);
-    assert.strictEqual(bdc.physical(1).source, 'oem');
-});
-test('colour changes coalesce: a burst of 20 changes makes one extra round with the last colour', async () => {
-    const { c, clock } = make();
-    await c.connect();
-    await c.enableCustom();
-    const before = writes(c).length;
-    for (let i = 0; i < 20; i++) c.setColour({ r: i, g: 0, b: 0 });
-    await tick();
-    await clock.advance(200);
-    const after = writes(c);
-    assert.strictEqual(after.length - before, 13, 'one round of 13 writes, not 20');
-    assert.strictEqual(after[after.length - 1].data[5], 19, 'the last colour won');
-});
-test('disableCustom writes the slaves inactive and stops the loop; the lights are OEM at once', async () => {
-    const { c, bdc, clock } = make();
-    await c.connect();
-    await c.enableCustom();
-    await c.disableCustom();
-    const last = writes(c).slice(-13);
-    assert.ok(last.every((w) => w.data[3] === 0 && w.data[8] === 0), 'ZUSTAND 0, ZEIT 0');
-    assert.strictEqual(bdc.physical(1).source, 'oem');
-    assert.strictEqual(c.custom, false);
-    const n = c.stats.rounds;
-    await clock.advance(60000);
-    assert.strictEqual(c.stats.rounds, n, 'no more rounds');
-    assert.strictEqual(clock.pending(), 0);
-});
-test('rejected writes: after maxRejects rounds in a row custom control switches itself off with an error', async () => {
-    const { c, clock } = make({ rejectNrc: 0x22 }, { maxRejects: 3, keepAliveFactor: 0.1 });
-    await c.connect();
-    const errors = [];
-    c.on('failure', (e) => errors.push(e));
-    const r = await c.enableCustom();
-    assert.strictEqual(r.ok, true, 'enabling itself works; the refusals come from the writes');
-    await clock.advance(5000);
-    assert.strictEqual(c.custom, false);
-    assert.strictEqual(errors.length, 1);
-    assert.ok(/refused 3 rounds/.test(c.lastError));
-    assert.ok(c.stats.rejected >= 3);
-});
-test('a slave that keeps refusing is skipped, the others keep going', async () => {
-    const { c, bdc, clock } = make({}, { maxSlaveFailures: 2, keepAliveFactor: 0.1 });
-    await c.connect();
-    bdc.slaves[2].bus = 2;                                       // NAD 3 now lives on the other bus: writes to it on bus 1 get NRC 31
-    await c.enableCustom();
-    await clock.advance(1100); await clock.advance(1100);
-    const n = writes(c).length;
-    await clock.advance(1100);
-    assert.strictEqual(writes(c).length - n, 12, 'NAD 3 skipped');
-    assert.ok(c.custom);
-});
-test('extended session: a 7F refusal opens 10 03 once and the write goes through', async () => {
-    const { c, bdc } = make({ needsExtendedSession: true });
-    await c.connect();
-    await c.enableCustom();
-    const seq = bdc.requests.map((r) => r.sid);
-    assert.ok(seq.indexOf(0x10) >= 0, 'session request sent');
-    assert.strictEqual(c.sessionNeeded, true);
-    assert.strictEqual(c.stats.accepted, 13);
-    assert.strictEqual(bdc.physical(1).source, 'custom');
-});
-test('session lapses (S3) and is re-opened on the next refusal', async () => {
-    const { c, bdc, clock } = make({ needsExtendedSession: true, s3Ms: 3000 });
-    await c.connect();
-    await c.enableCustom();
-    const sessions = () => bdc.requests.filter((r) => r.sid === 0x10).length;
-    assert.strictEqual(sessions(), 1);
-    await clock.advance(5100);
-    assert.strictEqual(sessions(), 2, 'opened again after S3');
-    assert.strictEqual(c.custom, true);
-});
-test('busy (NRC 21) once is just one rejected write; the round continues and the next round is fine', async () => {
-    const { c, clock } = make({ busyOnce: true });
-    await c.connect();
-    await c.enableCustom();
-    assert.strictEqual(c.stats.rejected, 1);
-    assert.strictEqual(c.stats.accepted, 12);
-    await clock.advance(5100);
-    assert.strictEqual(c.stats.accepted, 25);
-    assert.ok(c.custom);
-});
-test('timeouts (no reply) are counted and do not stop the loop', async () => {
-    const { c, bdc, clock } = make();
-    await c.connect();
-    bdc.dropNext = 2;
-    await c.enableCustom();
-    assert.strictEqual(c.stats.timeouts, 2);
-    assert.strictEqual(c.stats.accepted, 11);
-    await clock.advance(5100);
-    assert.ok(c.custom);
-});
-test('offline BDC: connect fails, custom control is refused', async () => {
-    const { c } = make({ offline: true });
-    const caps = await c.connect();
-    assert.strictEqual(caps.available, false);
-    assert.strictEqual(c.state, 'disconnected');
-    const refused = [];
-    c.on('refused', (r) => refused.push(r));
-    const r = await c.enableCustom();
+    await c.apply(SOLID);
+    bdc.rejectKeys.add('2:4');
+    const r = await c.restoreOem();
     assert.strictEqual(r.ok, false);
-    assert.strictEqual(refused.length, 1);
+    assert.deepStrictEqual(r.failed, ['2:4']);
+    assert.strictEqual(r.released, 18);
+    assert.ok(/lapse by themselves/.test(r.reason));
+    assert.ok(c.driven.has('2:4'), 'still counted as driven');
 });
-test('connection loss while custom is on: custom off, state disconnected; back on availability', async () => {
-    const { c, clock } = make();
+test('restoreOem with the transport gone reports the modules it could not release', async () => {
+    const { c } = make();
     await c.connect();
-    await c.enableCustom();
+    await c.apply(SOLID);
     c.online = false;
-    await clock.advance(5100);
-    assert.strictEqual(c.custom, false);
-    assert.strictEqual(c.state, 'disconnected');
+    const r = await c.restoreOem();
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.pending, 19);
+    assert.strictEqual(r.failed.length, 19);
+});
+test('apply and restore never interleave: a restore during an apply wins and leaves the modules OEM', async () => {
+    const { c, clock } = make({}, { latencyMs: 5 });
+    await c.connect();
+    const a = c.apply(SOLID);
+    const r = c.restoreOem();
+    await clock.advance(1000);
+    const [ra, rr] = await Promise.all([a, r]);
+    assert.strictEqual(ra.ok, true);
+    assert.strictEqual(rr.ok, true);
+    assert.strictEqual(c.program, null);
+    assert.strictEqual(phys(c, '2:1')[4], 'oem');
+    assert.strictEqual(c.driven.size, 0);
+});
+test('a second apply supersedes the first: the newest confirmed configuration wins', async () => {
+    const { c, clock } = make({}, { latencyMs: 5 });
+    await c.connect();
+    const a = c.apply(SOLID);
+    const b = c.apply(DUAL);
+    await clock.advance(1000);
+    await a; await b;
+    assert.strictEqual(c.program.mode, 'dual');
+    assert.deepStrictEqual(phys(c, '2:4'), [90, 200, 254, 45, 'custom']);
+});
+test('parking policy: strict blocks apply when the state is unknown or moving (fail closed); the mock is exempt only when told so', async () => {
+    let parkedState = null;
+    const { c } = make({}, { parkedPolicy: 'strict', parked: () => parkedState, kind: 'bdc-uds-like' });
+    await c.connect();
+    const refused = [];
+    c.on('refused', (why) => refused.push(why));
+    let r = await c.apply(SOLID);
+    assert.strictEqual(r.ok, false); assert.ok(/unknown/.test(r.reason));
+    parkedState = false;
+    r = await c.apply(SOLID);
+    assert.strictEqual(r.ok, false); assert.ok(/moving/.test(r.reason));
+    parkedState = true;
+    r = await c.apply(SOLID);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(refused.length, 2);
+    assert.strictEqual(writes(c).length, 19, 'nothing was written while blocked');
+});
+test('animated programs tick: frames are paced to the measured transport, unchanged modules are skipped, stale ones forced', async () => {
+    const { c, clock } = make({}, { latencyMs: 14, frameMs: 80 });
+    await c.connect();
+    const r = await applyAdv(c, clock, { mode: 'rainbow', periodS: 10, brightness: 100, zone: 'all' }, 400);
+    assert.strictEqual(r.ok, true);
+    const n0 = writes(c).length;
+    await clock.advance(3000);
+    assert.ok(c.stats.frames >= 8, 'frames: ' + c.stats.frames);
+    assert.ok(writes(c).length > n0 + 19 * 5, 'the cabin was repainted: ' + writes(c).length);
+    const col = phys(c, '2:1');
+    assert.notDeepStrictEqual(col.slice(0, 3), [255, 0, 0], 'moved on from red');
+    assert.strictEqual(col[4], 'custom');
+    assert.ok(c.fps() > 2, 'fps ' + c.fps());
+    const rp = c.restoreOem();
+    await clock.advance(1000);
+    const rr = await rp;
+    assert.strictEqual(rr.ok, true);
+    await clock.advance(1000);
+    assert.strictEqual(clock.pending(), 0, 'ticker stopped');
+});
+test('breathing changes brightness only; a static apply after an animation stops the ticker', async () => {
+    const { c, clock } = make({}, { latencyMs: 1 });
+    await c.connect();
+    await applyAdv(c, clock, { mode: 'breathing', colour: { r: 10, g: 20, b: 30 }, minBrightness: 10, maxBrightness: 90, periodS: 4, zone: 'dashboard' }, 100);
+    await clock.advance(1000);
+    const a = phys(c, '2:1');
+    await clock.advance(1000);
+    const b = phys(c, '2:1');
+    assert.deepStrictEqual(a.slice(0, 3), [10, 20, 30]); assert.notStrictEqual(a[3], b[3]);
+    assert.strictEqual(phys(c, '1:1')[4], 'oem', 'outside the zone untouched');
+    await applyAdv(c, clock, SOLID, 200);
+    const f = c.stats.frames;
+    await clock.advance(2000);
+    assert.strictEqual(c.stats.frames, f, 'no more frames');
+    assert.deepStrictEqual(phys(c, '2:1'), [254, 0, 0, 100, 'custom']);
+});
+test('busy and lost transport: busy is absorbed, a lost link stops control and reconnects on availability', async () => {
+    const { c, clock } = make({ busyEvery: 7 }, { latencyMs: 1 });
+    await c.connect();
+    const r = await applyAdv(c, clock, SOLID, 3000);
+    assert.strictEqual(r.written, 19, 'every module written despite busy replies');
+    assert.ok(c.scheduler.stats.busy >= 2);
+    c.online = false;
+    const p = c.apply({ mode: 'rainbow' }).catch(() => {});
+    await clock.advance(500);
+    await p;
+    assert.notStrictEqual(c.state, 'connected');
     c.online = true;
     c._availability(true);
     await tick(); await tick();
     assert.strictEqual(c.state, 'connected');
-    assert.strictEqual(c.custom, false, 'does not turn custom control back on by itself');
+    assert.strictEqual(c.program, null, 'nothing applied by itself after a reconnect');
 });
-test('restart: a new controller starts in OEM control with nothing remembered', async () => {
+test('every module refusing turns control off with a failure event', async () => {
+    const { c, clock } = make({ rejectNrc: 0x22 }, { maxSlaveFailures: 1 });
+    await c.connect();
+    const failures = [];
+    c.on('failure', (w) => failures.push(w));
+    const r = await c.apply(SOLID);
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(c.program, null);
+    assert.ok(failures.length >= 1);
+    await clock.advance(20000);
+    assert.strictEqual(clock.pending(), 0);
+});
+test('status carries the applied program, transport stats and per-module state', async () => {
     const { c } = make();
     await c.connect();
-    c.setColour({ r: 9, g: 9, b: 9 });
-    await c.enableCustom();
-    await c.shutdown();
-    const { c: fresh } = make();
-    await fresh.connect();
-    assert.strictEqual(fresh.custom, false);
-    assert.deepStrictEqual(fresh.colour, { r: 255, g: 255, b: 255 });
-});
-test('readState re-reads the slaves and reports', async () => {
-    const { c } = make();
-    await c.connect();
-    const st = await c.readState();
-    assert.strictEqual(st.slaves.length, 13);
-    assert.strictEqual(st.state, 'connected');
-});
-test('unknown or legacy body controller variants refuse custom control', async () => {
-    const { c } = make({ sgbdIndex: '0F2050' });
-    await c.connect();
-    assert.strictEqual(c.capabilities.rgbActuator, 'legacy');
-    assert.strictEqual(c.canControl().ok, true, 'the base class only refuses none/unsupported; bdc_uds adds the documented gate');
-    const { c: c2 } = make({ sgbdIndex: '0F16B0' });
-    await c2.connect();
-    assert.strictEqual(c2.canControl().ok, false);
-});
-test('status() is a complete snapshot for the diagnostics page', async () => {
-    const { c } = make();
-    await c.connect();
-    await c.enableCustom();
+    await c.apply(DUAL);
     const s = c.status();
-    assert.strictEqual(s.kind, 'mock');
-    assert.strictEqual(s.slaves.length, 13);
-    assert.ok(s.history.length > 0 && s.history[0].bytes.indexOf('2E DA 5E') === 0);
-    assert.ok(s.lastRequest.indexOf('2E DA 5E') === 0);
-    assert.strictEqual(s.lastReply, '6E DA 5E');
-    assert.strictEqual(s.stats.accepted, 13);
+    assert.strictEqual(s.program.mode, 'dual');
+    assert.ok(/top #A03CFE 80%/.test(s.description));
+    assert.strictEqual(s.driven, 19);
+    assert.strictEqual(s.scheduler.accepted, 19);
+    assert.strictEqual(s.slaves.filter((m) => m.driven).length, 19);
     await c.shutdown();
-    assert.strictEqual(c.custom, false);
+    assert.strictEqual(c.status().program, null);
 });
-test('shutdown releases the lights', async () => {
-    const { c, bdc } = make();
+test('every write the controller sends passes the allow list and never carries 0xFF in a colour byte', async () => {
+    const { c, clock } = make();
     await c.connect();
-    await c.enableCustom();
-    await c.shutdown();
-    assert.strictEqual(bdc.physical(1).source, 'oem');
-});
-test('the car layout: 7 + 12 slaves on two buses, each written on its own bus with its own DID', async () => {
-    const { G20_SLAVES } = require(path.join(JS, 'lighting_mock'));
-    const clock = fakeClock();
-    const bdc = new MockBdc({ now: clock.now, slaves: G20_SLAVES.bus1, slaves2: G20_SLAVES.bus2 });
-    const c = new MockLightingController({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, minGapMs: 0 });
-    await c.connect();
-    assert.strictEqual(c.slaves.length, 19);
-    assert.strictEqual(c.slaves.filter((s) => s.bus === 2).length, 12);
-    assert.strictEqual(c.slaves.find((s) => s.bus === 2 && s.nad === 3).location, 'Contour line dashboard driver');
-    c.setColour({ r: 255, g: 0, b: 0 });
-    await c.enableCustom();
-    const w = writes(c);
-    assert.strictEqual(w.length, 19);
-    assert.strictEqual(w.filter((x) => x.data[0] === 0xE3 && x.data[1] === 0xD1).length, 12, 'bus 2 slaves go to E3D1');
-    assert.strictEqual(w.filter((x) => x.data[0] === 0xDA && x.data[1] === 0x5E).length, 7, 'bus 1 slaves go to DA5E');
-    assert.strictEqual(bdc.physical(3, 2).source, 'custom', 'the dashboard driver line follows');
-    const st = await c.readState();
-    assert.strictEqual(st.slaves.filter((s) => s.r === 254 && s.g === 0).length, 19, 'E3D1 / DA5F read back the custom colour on every module');
-    await c.disableCustom();
-    assert.strictEqual(bdc.physical(3, 2).source, 'oem');
-});
-test('the mock BDC honours 0xFF as "no change" the way the car does', async () => {
-    const { c, bdc } = make();
-    await c.connect();
-    bdc.uds(0x40, 0x2E, [0xDA, 0x5E, 1, 1, 100, 0x00, 0xFE, 0x00, 5]);        // green
-    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [0, 254, 0]);
-    bdc.uds(0x40, 0x2E, [0xDA, 0x5E, 1, 1, 100, 0xFF, 0xFF, 0xFF, 5]);        // no change
-    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [0, 254, 0]);
-    c.setColour({ r: 255, g: 255, b: 255 });
-    await c.enableCustom();
-    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [254, 254, 254], 'the controller never sends FF');
-    await c.disableCustom();
-});
-test('every write the mock controller sends passes the allow list', async () => {
-    const { c } = make();
-    await c.connect();
-    await c.enableCustom();
-    await c.disableCustom();
-    c.bdc.requests.forEach((r) => assert.strictEqual(P.checkRequest(r.target, r.sid, r.data), null, JSON.stringify(r)));
+    await c.apply({ mode: 'solid', colour: { r: 255, g: 255, b: 255 }, brightness: 100, zone: 'all' });
+    await c.apply({ mode: 'wave' });
+    await clock.advance(500);
+    await c.restoreOem();
+    c.bdc.requests.forEach((r) => {
+        assert.strictEqual(P.checkRequest(r.target, r.sid, r.data), null, JSON.stringify(r));
+        if (r.sid === 0x2E) assert.ok(r.data.slice(5, 8).every((b) => b !== 0xFF), 'FF in ' + JSON.stringify(r.data));
+    });
 });
 
 module.exports = run('controller');

@@ -35,7 +35,10 @@ class MockBdc {
         this.rejectNrc = o.rejectNrc || null;
         this.dropNext = o.dropNext || 0;
         this.busyOnce = !!o.busyOnce;
+        this.busyEvery = o.busyEvery || 0;                           // every Nth write answers NRC 21 (0 = never)
+        this.rejectKeys = new Set(o.rejectKeys || []);               // 'bus:nad' modules that refuse writes with NRC 31
         this.offline = !!o.offline;
+        this.writes = 0;
         this.session = 1; this.sessionAt = 0;
         const mk = (bus) => (loc, i) => ({ bus, nad: i + 1, locationId: loc, active: false, r: 0, g: 0, b: 0, brightness: 0, until: 0 });
         const real = !o.slaves && !o.slaves2;                       // no layout given: the G20's own (19 modules)
@@ -93,12 +96,15 @@ class MockBdc {
             if (did !== P.DID.LIN1_LAYERING_CTRL && did !== P.DID.LIN2_LAYERING) return neg(0x31);
             if (this.needsExtendedSession && !this._sessionOk()) return neg(0x7F);
             if (this.busyOnce) { this.busyOnce = false; return neg(0x21); }
+            this.writes++;
+            if (this.busyEvery && this.writes % this.busyEvery === 0) return neg(0x21);
             if (this.rejectNrc) return neg(this.rejectNrc);
             if (data.length !== 9) return neg(0x13);
             const nad = data[2];
             if (nad > 31) return neg(0x31);
             const s = this.slaves.find((x) => x.nad === nad && x.bus === (did === P.DID.LIN2_LAYERING ? 2 : 1));
             if (!s) return neg(0x31);
+            if (this.rejectKeys.has(s.bus + ':' + s.nad)) return neg(0x31);
             // as the car: a colour byte of 0xFF leaves that channel unchanged
             s.active = data[3] === 1; s.brightness = data[4];
             if (data[5] !== 0xFF) s.r = data[5];
@@ -119,8 +125,10 @@ class MockLightingController extends LightingController {
         this.bdc = o.bdc instanceof MockBdc ? o.bdc : new MockBdc(Object.assign({ now: this._now }, o.bdc || {}, o.mock || {}));
         this.online = o.online !== false;
         this.sessionNeeded = false;
+        this.latencyMs = o.latencyMs || 0;                           // simulated transport time per write (via the injected timers)
     }
     _available() { return this.online && !this.bdc.offline; }
+    _delay() { return this.latencyMs ? new Promise((r) => this._setTimeout(r, this.latencyMs)) : Promise.resolve(); }
     _exchange(sid, data) {
         this.lastRequest = P.hexBytes([sid].concat(data));
         const r = this.bdc.uds(P.ADDR.BDC_BODY, sid, data);
@@ -147,6 +155,8 @@ class MockLightingController extends LightingController {
         const bytes = P.encodeLayeringWrite({ bus: slave.bus, nad: slave.nad, active: params.active, brightness: params.brightness, r: params.r, g: params.g, b: params.b, seconds: params.seconds });
         const bad = P.checkRequest(P.ADDR.BDC_BODY, P.SID.WRITE, bytes);
         if (bad) return { ok: false, reason: 'blocked: ' + bad };
+        await this._delay();
+        if (!this._available()) return { ok: false, reason: 'transport lost' };
         const did = (bytes[0] << 8) | bytes[1];
         let reply = this._exchange(P.SID.WRITE, bytes);
         let dec = P.decodeReply(P.SID.WRITE, did, reply);
@@ -158,8 +168,11 @@ class MockLightingController extends LightingController {
         if (!dec.ok && dec.reason === 'no reply') dec.reason = 'timeout';
         return Object.assign({ bytes: P.hexBytes([P.SID.WRITE].concat(bytes)) }, dec);
     }
-    /** What the (simulated) LEDs show: the first slave's colour. */
-    physicalColour() { return this.bdc.physical(this.slaves.length ? this.slaves[0].nad : 1); }
+    /** What the (simulated) LEDs show: one module (default the first) or, with key 'bus:nad', that one. */
+    physicalColour(key) {
+        if (key) { const m = /^(\d+):(\d+)$/.exec(key); if (m) return this.bdc.physical(+m[2], +m[1]); }
+        return this.bdc.physical(this.slaves.length ? this.slaves[0].nad : 1, this.slaves.length ? this.slaves[0].bus : 1);
+    }
     status() { return Object.assign(super.status(), { lastRequest: this.lastRequest || null, lastReply: this.lastReply || null }); }
 }
 

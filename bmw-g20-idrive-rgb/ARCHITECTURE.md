@@ -1,6 +1,6 @@
 # ARCHITECTURE.md
 
-## 1. The car side (what is established, what is hypothesis)
+## 1. The car side (verified on the G20 330e, 2026-11-04)
 
 ```
  ┌─────────────────────────────── MGU head unit (iDrive 7) ───────────────────────────────┐
@@ -10,104 +10,118 @@
  └───────────────────────────────────────────────────────────────────────┬─────────────────┘
                                    vehicle Ethernet / diagnostic routing │  UDS to address 0x40
  ┌───────────────────────────────────────────────────────────────────────▼─────────────────┐
- │  BDC (body domain controller; gateway 0x10 and body 0x40 are the same box)              │
- │   coding 360A LIC_LCI_COLOR_LIBRARY_DATA (persistent RGB library, 10 colours)           │
- │   coding 360D LIC_LCI_COLOR_PROFILES_DATA (which library colour each iDrive entry uses) │
- │   diagnostic functions (SGBD BDC_G05): 2E DA5E "drive LIN layering slave NAD with       │
- │   R,G,B, brightness for ZEIT seconds", 22 DA5F / 22 E3D1 slave status, 22 4800 PWM ...  │
+ │  BDC (body domain controller BDC_G05; gateway 0x10 and body 0x40 are the same box)      │
+ │   2E DA5E / 2E E3D1: drive one RGB LIN module (NAD) with R, G, B and brightness for      │
+ │   ZEIT seconds; ZUSTAND 0 hands it back at once (both verified, ~14 ms per write)       │
+ │   22 DA5F / 22 E3D1: every module's location, live colour, brightness and faults         │
  └──────────────┬──────────────────────────────────────────────────────────────────────────┘
-                │ LIN ("FI-LIN-1", "FI-LIN-2"): up to 26 RGB slaves per bus, one per fitting
+                │ LIN: FI-LIN-1 = 7 passenger-side modules, FI-LIN-2 = dashboard + front footwells + driver side
  ┌──────────────▼──────────────────────────────────────────────────────────────────────────┐
- │  ambient LED modules: dashboard contour lines, door contour / indirect trim, footwells, │
- │  centre console, cupholders ... (TAB_INNENLICHT_VERBAUORT_LIN locations)                │
+ │  19 ambient LED modules: 3 dashboard contour lines, 4 door contour lines, 4 door-opener  │
+ │  (handle) lights, 4 map-pocket lights, 4 footwells                                       │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Established (High):**
-- The MGU's app platform lets an app send UDS to any ECU through TASU; writes (`2E`, `2F`) to the DME
-  and DSC are already done that way by shipped apps (RESEARCH.md, idrive7-apps `live_adjustments`).
-- The BDC body is diagnostic address `0x40` on a G20 330e; the ambient modules are LIN slaves of the BDC.
-- The BDC_G05 SGBD documents the per-slave RGB actuator with a timeout (PROTOCOL_FINDINGS.md §2).
+Established on the car: the actuator works in the default session with no unlock, overrides the OEM
+lighting whether it is on or off, times out by itself and releases instantly; the BDC stores no fault.
+Open: the head unit's own TASU latency (the ~14 ms is over ENET), and whether the OEM function ever
+re-asserts a module mid-ZEIT. PROTOCOL_FINDINGS.md has every frame.
 
-**Hypothesis (how stock iDrive changes the colour), refined by the evidence:**
-The user's hypothesis holds at the BDC end: the BDC owns the colour library (360A) and the profiles
-(360D); the stock menu offers a *selection* among profiles, so the HMI must transmit a selection, not
-an RGB value. How the MGU transmits it (a SOME/IP field of a body/vehicle-settings service, a CAN
-signal gatewayed by the BDC, or a personalisation setting the BDC subscribes to) is **not established**;
-no public source names it and the master catalog has not been read. It does not matter for the
-diagnostic path, which bypasses the selection entirely.
-
-## 2. The app side
+## 2. The app: preview, apply, keep alive
 
 ```
- main.js (UI: pages, wheel, favourites, diagnostics)            Favourites (data/favourites.json)
-     │ setColour / enableCustom / disableCustom / restoreOem / probe / status
-     ▼
- LightingController (lighting_controller.js)
-   state machine: disconnected → connecting → connected (→ error)
-   custom-control loop: coalesced writes, keep-alive at ZEIT/2, auto-off after N refusals / link loss
-   ├── MockLightingController   (lighting_mock.js)     MockBdc: answers the documented bytes, times out ZEIT
-   ├── BdcUdsLightingController (lighting_bdc_uds.js)  kit/diag.js → TASU → BDC 0x40; gates: armed, variant, slaves, allow list
-   └── SomeIpLightingController (lighting_someip.js)   probe for a catalog interface; never writes
- lighting_protocol.js: DIDs, encoders/decoders, variant table, checkRequest() allow list
+ UI (main.js)                        DRAFTS: colours / dual / modes      nothing leaves the screen
+   ├─ ui_widgets.js  wheel, brightness ring, swatch, stepper, the rotary Editor (enter / turn / confirm / cancel)
+   │
+   │  apply(program)  ◄── Apply button, bar Apply, or the confirming press (setting "Press to confirm applies")
+   ▼
+ LightingController (lighting_controller.js)       APPLIED state only
+   ├─ lighting_scene.js   program -> per-module targets { 'bus:nad': { r, g, b, brightness } }
+   │                      groups (upper / lower), zones, modes (solid, dual, zones, rainbow, fade, breathing, wave), presets
+   ├─ lighting_scheduler.js  one write at a time, newest target per module wins, release > apply > frame,
+   │                      obsolete frames dropped whole, busy retried, drain() for restore
+   └─ _writeSlave()      lighting_mock.js (simulated BDC, 19 modules, latency / busy / reject injection)
+                         lighting_bdc_uds.js (kit/diag.js over TASU; armed, variant and allow-list gates)
 ```
 
-The UI only ever sees the controller; the three implementations share the byte layer, so what the mock
-accepts is exactly what the car will be asked.
+### Preview vs applied
 
-### Custom control as a loop, not a setting
+Every page edits a draft: turning the knob, tapping the wheel or the dial, pressing + / - changes the
+screen only. The controller is called exactly twice: `apply(program)` with a confirmed configuration and
+`restoreOem()`. An applied static configuration keeps receiving its keep-alives while a different draft
+is browsed. Leaving a page, Cancel, or the hardware BACK drops the draft; the applied state is untouched.
 
-The actuator holds a module for `ZEIT` seconds and then releases it (verified: PROTOCOL_FINDINGS §0.1).
-The app therefore does not "set" a colour; it **keeps driving** every selected module with the colour
-to show now, in rounds. Consequences, with the numbers measured on the car (14 ms per write over ENET,
-19 modules, so a round is about 0.3 s):
+### Programs and scenes
 
-- **a colour change is a transition**: the rounds run back to back and each writes the colour
-  interpolated between where the lights are and the target (setting *Fade between colours*, 600 ms by
-  default, 0 = jump). A fade therefore has about three steps per second across the whole cabin, more
-  on a single zone; the old "jump" was one write per colour;
-- **rainbow mode** is a transition that never ends: the hue turns once per *Rainbow: seconds per turn*;
-- **zones** (*Modules to drive*: all, dashboard lines, doors, footwells, front, rear) limit the rounds
-  to those modules; modules that leave the zone are released once (`ZUSTAND 0`) and stay OEM;
-- between transitions the loop sleeps until the **keep-alive**, due at `ZEIT × 0.5` minus the time the
-  last round took, so a slow transport can never let a module lapse (default ZEIT 10 s);
-- if the app crashes, the head unit restarts, or the link drops, the lights return to OEM within ZEIT;
-- *Custom off* / *Restore OEM* writes `ZUSTAND 0, ZEIT 0` to every driven module (instant, verified)
-  and stops the loop;
-- nothing persistent is touched: no coding, no settings in the BDC, no flash.
+A program is what the user confirms (`lighting_scene.js`): `solid` (colour, brightness, zone), `dual`
+(upper and lower colour and brightness, with the door-handle lights assigned by the setting *Door handle
+lights belong to*), `zones` (a list of zone assignments, later ones win, so changing one zone keeps the
+others), `rainbow`, `fade` (a palette with transition and hold times), `breathing` (brightness between two
+limits), `wave` (a hue travelling from the dashboard to the rear, ordered by each module's real location).
+`render(program, modules, now)` is pure: static programs render the same scene at any time; animated ones
+render a frame. Groups come from the module locations: dashboard and door contour lines are upper; map
+pockets and footwells are lower; handles go where the program says. Zones: all, dashboard, front doors,
+rear doors, footwells, upper, lower, front, rear, driver side, passenger side, or one module.
 
-### Factory controls stay authoritative
+### Keep-alive and animation
 
-- The app starts in OEM control after every start; custom control is never remembered across restarts.
-- The OEM brightness and on/off are left alone (no `D519`, no `4804` writes). While the actuator is
-  active the BDC is being told what to show by diagnostics, so the OEM state is overridden *for those
-  slaves, for ZEIT*; whether a "lighting off" in iDrive wins over the actuator is **unknown** and is one
-  of the first things to observe (NEXT_STEPS.md). Disabling custom control hands everything back.
-- Custom control can only be switched on while parked (speed signal ≤ 3 km/h via the kit's `parked.js`);
-  once on, driving does not switch it off (no change of lighting while driving).
+The actuator holds a module for ZEIT seconds (10 s default, 30 s cap on the car path). A static program is
+written once; afterwards a module is rewritten only when its last accepted write is older than ZEIT/2
+(checked every ZEIT/4). An animated program ticks: each tick renders a frame and hands it to the scheduler,
+which writes only the modules whose target changed, plus those about to lapse; a tick arrives every
+`max(frameMs, modules × measured latency × 1.1)`, so frames never queue up behind the transport, and a frame
+the transport could not keep up with is dropped whole rather than sent late.
 
-## 3. The control paths, as ranked by the brief
+### The scheduler, and why there is no concurrency
 
-| # | Approach | Status | Evidence |
-|---|---|---|---|
-| 1 | Native SOME/IP lighting service | **Unknown** | No public source; `lighting_someip.js` probes candidate names; `tools/laptop/catalog_search.py` over the unit's `someip-interfaces.json` will settle it. If a writable colour field exists it would be the preferred path (no diagnostics, no timeout). |
-| 2 | MGU → BDC diagnostics (`2E DA5E` over TASU) | **Documented, unverified on a car; implemented and gated** | SGBD BDC_G05 `INNENLICHT_FI_LIN_1_LAYERING_STEUERN`; TASU precedent for `2E` writes; address 0x40. |
-| 3 | Runtime preset override (rewrite a library colour) | **Not pursued** | 360A is coding data: writing it needs the coding session and security access, and it is persistent; it cannot be "temporary" and would be a recode per colour change. It remains the fallback for a *fixed* custom palette through the stock menu (10 slots). |
-| 4 | Alternative | **Available if 2 fails** | `2E 4804` (function modes: Ambient Light - On for a time) and `2F 4800` (PWM % per channel) give on/off and brightness, not colour. A fixed palette via Approach 3 plus the stock menu is the colour fallback. |
+The head unit's TASU gateway takes one diagnostic request at a time (kit/diag.js turns a second one away
+with `APP_REQUEST_TEMPORARILY_NOT_ACCEPTED`), and the positive reply to a layering write (`6E DA 5E`) carries
+no module address, so two writes to the same identifier in flight could not be told apart. The scheduler
+therefore sends one write at a time; its gains come from coalescing (newest target per module, in queue
+order, so one busy module cannot starve the rest), priorities (release > apply > frame), skipping unchanged
+targets, dropping obsolete frames, and retrying `busy` with backoff. `maxInFlight 2` (one per LIN bus) exists
+for experiments only: the simulation shows a full-cabin frame at 266 ms sequential (3.8 frames/s at the
+measured 14 ms per write) against 168 ms if the transport allowed two in flight, which it is not expected to.
 
-## 4. Input and rendering on the head unit
+**NAD 0** is NOT assumed to be a broadcast. The LIN broadcast address is `0x7F`; the BDC's `NAD 0..31`
+argument range says nothing about group control. It stays an untested, optional experiment (NEXT_STEPS.md).
 
-- Full-screen layout on the kit renderer (mgu-render/1 dialect with touch routing): taps land on the
-  page (`ctx.onTap`, the wheel and the value slider), on-page buttons are targets the touchscreen and
-  the iDrive knob reach; the knob can also be grabbed to turn hue / saturation / value directly
-  (setting *iDrive knob turns*; needs the controller gate `mgu-inputgate.so`).
-- Standard layout / software renderer: the HMI's four bar buttons (Custom on/off, Restore OEM, Next
-  page, Settings) and the Hue/Saturation/Value settings still control everything, without the wheel's taps.
-- The wheel is 24 ramped arcs in a cached layer (no pixel images: the Store renderer has none).
+### Restore OEM
+
+`restoreOem()` stops the ticker and the keep-alive, drops every queued frame, releases every module this
+controller has driven (`ZUSTAND 0, ZEIT 0`, verified instant), waits for the transport, and reports the
+releases that were accepted and the keys that were not; it never claims success for a module whose release
+was refused or unanswered (those lapse by themselves within ZEIT). `apply` and `restoreOem` are serialised,
+so a restore issued during an apply wins and leaves every module OEM.
+
+### Vehicle state
+
+With the car link, lighting changes are **blocked unless the car is known to be parked** (speed from
+`Vehicle2.statusCarSpeed2` ≤ 3 km/h). An unknown speed blocks too (fail closed); the setting *Lighting
+changes while driving* can relax this. The simulated link is exempt.
+
+## 3. Input and rendering
+
+- Full-screen layout on the kit renderer (mgu-render/1 dialect with touch routing): the knob walks the
+  header tabs, the page's controls (targets) and the bar buttons; a press on a wheel or dial ENTERS it: the
+  app grabs the knob (`ctx.controller.grab`), turns adjust the draft, a press confirms (and applies, with the
+  setting on), a tilt left cancels, and the knob returns to the HMI. The hardware BACK is never intercepted.
+- Touch: taps on the wheel, the dial and the buttons (the kit routes taps, not drags, to the page).
+- Without the controller gate the knob cannot be grabbed: every control has - / + buttons the kit's focus
+  ring reaches, so the app stays usable from the knob alone.
+- The wheel is 24 ramped arcs in a cached layer; the dial is three arcs (no pixel images: the Store renderer
+  has none). Angles follow the kit: 0 at 12 o'clock, clockwise.
+
+## 4. The control paths, as ranked by the brief
+
+| # | Approach | Status |
+|---|---|---|
+| 1 | Native SOME/IP lighting service | Unknown: no public source; the unit's catalog (`tools/laptop/catalog_search.py`) would settle it |
+| 2 | MGU → BDC diagnostics (`2E DA5E` / `E3D1`) | **Verified on the car over ENET**; the app's path; TASU latency not yet measured |
+| 3 | Runtime preset override (coding 360A) | Not pursued: persistent, needs the coding session |
+| 4 | Alternative | Not needed |
 
 ## 5. The laptop side
 
-`tools/laptop/enetdiag`: ENET cable → UDP 6811 discovery → TCP 6801 HSFZ → UDS `0x22` only. It
-identifies the gateway, MGU and BDC (`F150`, `F101`, ...), reads the BDC's interior-light identifiers
-(`DA5F`, `E3D1`, `4800`, `2300`) and writes a redacted JSON report whose `analysis` block states whether
-the car is a documented variant with RGB slaves, i.e. whether a gated write test is justified.
+`tools/laptop/enetdiag`: read-only discovery (UDS 0x22 only). `tools/laptop/write_test.py`: the gated,
+one-frame-per-step write test with the colour cycle and fades, which produced the verification.

@@ -1,70 +1,68 @@
 'use strict';
 /**
- * Ambient RGB - a colour wheel for the G20's factory ambient lighting, as a native iDrive 7 (MGU) app on the
- * MGU App Kit (cauliflowermossgrape/idrive7-apps). Three pages (header tabs): COLOUR (the wheel, value slider,
- * HSV nudges, preview, link status), FAVOURITES (saved colours and the BDC's own six), DIAGNOSTICS (what the
- * body controller answered, what is verified, every exchange).
+ * Ambient RGB - the G20's factory ambient lighting under your control, as a native iDrive 7 (MGU) app on the MGU App
+ * Kit (cauliflowermossgrape/idrive7-apps). Five pages (header tabs):
  *
- * The UI only talks to a LightingController (lighting_controller.js): the simulated BDC by default
- * (lighting_mock.js), the car's BDC over the head unit's diagnostic link when the setting "Lighting link" is
- * "Car" AND "Write to the car" is armed (lighting_bdc_uds.js; unarmed it dry-runs and logs the bytes).
+ *   COLOURS    a colour wheel, a circular brightness dial, a zone picker, the preview, Apply / Cancel
+ *   DUAL       upper and lower lighting with their own colour and brightness; swap, copy, save, Apply both
+ *   MODES      Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave with their settings; Apply
+ *   FAVOURITES saved colours and saved complete configurations (colours, brightness, zones, mode, animation)
+ *   DIAGNOSTICS link, body controller, transport performance, write controls
  *
- * Input: touch on the wheel / slider / buttons where the kit runs the screen (GPU renderer, full-screen
- * layout); the HMI's bar buttons everywhere (Custom on/off, Restore OEM, Next page, Settings); the iDrive knob
- * turns hue / saturation / value on the COLOUR page when the controller gate is installed (setting "knob");
- * and, for a unit without touch routing, the Hue / Saturation / Value settings in the Settings screen.
+ * PREVIEW vs APPLIED: every page edits a DRAFT. Turning the knob, tapping the wheel or the dial changes only the
+ * screen. The car changes when Apply (a page button, the bar's Apply, or the confirming press when the setting
+ * "Press to confirm applies" is on) hands the draft to the LightingController, which is the only thing that writes.
+ * Leaving a page or pressing Cancel drops the draft. An applied static configuration keeps its keep-alives while
+ * another draft is being browsed.
+ *
+ * Input: the iDrive knob walks the page's controls (the kit's focus ring); a press on a wheel or a dial ENTERS it
+ * (the knob is grabbed), turns adjust the draft, a press confirms, a tilt left cancels; BACK leaves the page.
+ * Touch: taps on the wheel / dial / buttons. Without a controller gate every control also has - / + buttons.
  */
 const mgu = require('./kit/mgu');
 const G = require('./kit/gauges');
 const { withAlpha } = require('./kit/canvas');
 const C = require('./colour');
+const W = require('./ui_widgets');
+const S = require('./lighting_scene');
 const { Favourites } = require('./favourites');
 const { MockLightingController } = require('./lighting_mock');
 const { BdcUdsLightingController } = require('./lighting_bdc_uds');
 const { SomeIpLightingController } = require('./lighting_someip');
-const { ZONES } = require('./lighting_protocol');
 
-const PAGES = ['Colour', 'Favourites', 'Diagnostics'];
-const WHEEL = { size: 400, x: 70, y: 70 };                   // page px; ramped arcs in a cached layer (no pixel images: those need one renderer dialect only)
-const SLIDER = { x: 520, y: 72, w: 44, h: 396 };
-const RIGHT = { x: 610, y: 60, w: 970, h: 452 };
-
-/** hue / sat / val from the FrontCCU knob (counter wrapping at 16 bits), as apps/doom/controls.js reads it. */
-class Knob {
-    constructor() { this.pos = null; this.pressed = false; }
-    /** returns { turn, press } for one statusRotaryEncoderState event */
-    read(v) {
-        const out = { turn: 0, press: false };
-        if (!v) return out;
-        const pos = v.frontRotaryEncoderOperation;
-        if (typeof pos === 'number' && pos !== 65535) {
-            if (this.pos !== null) { const d = ((pos - this.pos + 32768) & 0xffff) - 32768; if (Math.abs(d) <= 64) out.turn = d; }
-            this.pos = pos;
-        }
-        const pb = v.frontRotaryEncoderPushButton;
-        const p = pb === 1 || pb === 2 || (typeof pb === 'string' && /GEDRUECKT/.test(pb));
-        if (p && !this.pressed) out.press = true;
-        this.pressed = p;
-        return out;
-    }
-}
+const PAGES = ['Colours', 'Dual', 'Modes', 'Favourites', 'Diagnostics'];
+const ZONE_ORDER = ['all', 'dashboard', 'frontDoors', 'rearDoors', 'footwells', 'upper', 'lower'];
+const MODE_ORDER = ['solid', 'dual', 'rainbow', 'fade', 'breathing', 'wave'];
+const hsvOf = (c) => C.rgbToHsv(c);
+const rgbOf = (hsv) => C.hsvToRgb(hsv.h, hsv.s, hsv.v);
+const clone = (o) => JSON.parse(JSON.stringify(o));
 
 mgu.run({
     async start(ctx) {
         const log = ctx.log, settings = ctx.settings;
         const favs = new Favourites(ctx.dataDir, log);
-        let page = 0, hsv = { h: 210, s: 1, v: 1 }, channel = 'h', deleteMode = false, flash = null, probing = false;
-        let ctl = null, parked = null, knobGrabbed = false;
-        const knob = new Knob();
-        const wheelLayer = () => G.layer('ambient_rgb:wheel', WHEEL.size + 2, WHEEL.size + 2, (c) => C.drawWheel(c, WHEEL.size / 2 + 1, WHEEL.size / 2 + 1, WHEEL.size / 2));
-
+        const editor = new W.Editor(ctx, log);
+        let page = 0, flash = null, probing = false, busy = false, deleteMode = false;
+        let ctl = null, parked = null;
         const say = (text, ms) => { flash = { text, until: Date.now() + (ms || 2500) }; };
-        const colour = () => C.hsvToRgb(hsv);
 
-        /* ---------- the lighting controller for the chosen link ---------- */
+        /* ---------- drafts (previews): one per page, never sent anywhere by themselves ---------- */
+        const draft = {
+            colours: { hsv: { h: 262, s: 0.76, v: 1 }, brightness: 100, zone: 0 },                       // zone: index into ZONE_ORDER
+            dual: { top: { hsv: { h: 270, s: 0.76, v: 1 }, brightness: 80 }, bottom: { hsv: { h: 200, s: 0.65, v: 1 }, brightness: 45 }, focus: 'top' },
+            modes: { mode: 0, params: clone(S.DEFAULTS) },                                                 // mode: index into MODE_ORDER
+        };
+        let dirty = { colours: false, dual: false, modes: false };
+        const markDirty = (p) => { dirty[p] = true; };
+
+        /* ---------- the lighting link ---------- */
         async function makeController() {
             if (ctl) { try { await ctl.shutdown(); } catch (e) { /* */ } ctl.removeAllListeners(); }
-            const common = { log, refreshSeconds: Number(settings.get('refresh')) || 10, brightness: Number(settings.get('brightness')) || 100, fadeMs: Number(settings.get('fade')) || 0, rainbowPeriodS: Number(settings.get('rainbow')) || 20 };
+            const common = {
+                log, refreshSeconds: Number(settings.get('refresh')) || 10, frameMs: Number(settings.get('frame')) || 80,
+                maxInFlight: settings.get('inflight') === '2' ? 2 : 1, parkedPolicy: settings.get('parked') === 'lenient' ? 'lenient' : 'strict',
+                parked: () => (parked ? (parked.speed() === null ? null : !parked.moving()) : null),
+            };
             const backend = settings.get('backend');
             if (backend === 'bdc') {
                 ctl = new BdcUdsLightingController(Object.assign(common, { signals: ctx.signals, armed: settings.get('arm') === 'on', allowUnknownVariant: settings.get('unknownVariant') === 'on' }));
@@ -72,13 +70,11 @@ mgu.run({
             } else if (backend === 'someip') {
                 ctl = new SomeIpLightingController(Object.assign(common, { signals: ctx.signals }));
             } else {
-                ctl = new MockLightingController(common);
+                ctl = new MockLightingController(Object.assign(common, { latencyMs: Number(settings.get('simLatency')) || 0 }));
             }
-            ctl.on('failure', (why) => say('Custom control off: ' + why, 5000));
-            ctl.on('refused', (why) => say('Cannot enable: ' + why, 4000));
+            ctl.on('failure', (why) => say('Lighting control stopped: ' + why, 5000));
+            ctl.on('refused', (why) => say('Cannot apply: ' + why, 4000));
             ctl.on('state', (s, err) => { if (s === 'disconnected' && err) say('Link: ' + err, 4000); });
-            ctl.setColour(colour());
-            ctl.setZone(settings.get('zone') || 'all', ZONES[settings.get('zone')] || null);
             probing = true;
             await ctl.connect();
             probing = false;
@@ -87,221 +83,337 @@ mgu.run({
         await makeController();
         try { parked = require('./kit/parked').watch(ctx, log); } catch (e) { log.warn('parked: ' + e); }
 
-        /* ---------- colour changes ---------- */
-        function setHsv(next, why) {
-            hsv = { h: C.wrapHue(next.h), s: C.clamp01(next.s), v: C.clamp01(next.v) };
-            ctl.setColour(colour());
-            if (why) log.info('colour ' + C.rgbToHex(colour()) + ' (' + why + ')');
+        /* ---------- programs from drafts ---------- */
+        const zoneName = () => ZONE_ORDER[draft.colours.zone];
+        function coloursProgram() {
+            const d = draft.colours, zone = zoneName();
+            if (zone === 'all') return { mode: 'solid', colour: rgbOf(d.hsv), brightness: d.brightness, zone: 'all' };
+            // a zone: merge into the applied zones program so other zones keep their colours
+            const prev = ctl.program && ctl.program.mode === 'zones' ? ctl.program.assignments : ctl.program && ctl.program.mode === 'solid' ? [{ zone: ctl.program.zone, colour: ctl.program.colour, brightness: ctl.program.brightness }] : [];
+            const assignments = prev.filter((a) => a.zone !== zone).concat([{ zone, colour: rgbOf(d.hsv), brightness: d.brightness }]);
+            return { mode: 'zones', assignments, handlesTo: settings.get('handles') || 'bottom' };
         }
-        function setRgb(c, why) { setHsv(C.rgbToHsv(c), why); }
+        function dualProgram() {
+            const d = draft.dual;
+            return { mode: 'dual', top: { colour: rgbOf(d.top.hsv), brightness: d.top.brightness }, bottom: { colour: rgbOf(d.bottom.hsv), brightness: d.bottom.brightness }, handlesTo: settings.get('handles') || 'bottom' };
+        }
+        function modesProgram() {
+            const mode = MODE_ORDER[draft.modes.mode];
+            if (mode === 'solid') return Object.assign({}, draft.modes.params.solid, { mode: 'solid' });
+            if (mode === 'dual') return dualProgram();
+            return Object.assign({}, draft.modes.params[mode], { mode });
+        }
+        const pageProgram = () => (page === 0 ? coloursProgram() : page === 1 ? dualProgram() : page === 2 ? modesProgram() : null);
 
-        async function toggleCustom() {
-            if (ctl.custom) { await ctl.disableCustom(); say('Custom control off: OEM lighting'); return; }
-            if (parked && parked.moving()) { say('Park the car to switch to a custom colour', 4000); return; }
-            const r = await ctl.enableCustom();
-            if (r.ok) say('Custom control on' + (ctl.armed === false ? ' (dry run: not armed)' : ''));
+        /* ---------- actions ---------- */
+        async function applyProgram(program, what) {
+            if (busy) { say('Please wait'); return; }
+            busy = true;
+            try {
+                const r = await ctl.apply(program);
+                if (r.ok) { say((what || 'Applied') + (r.failed ? ' (' + r.failed + ' module(s) refused)' : '') + (ctl.kind === 'bdc-uds' && !ctl.armed ? ' [dry run]' : '')); dirty = { colours: false, dual: false, modes: false }; }
+                else say('Not applied: ' + (r.reason || 'refused'), 4500);
+            } finally { busy = false; }
         }
-        async function restoreOem() { await ctl.restoreOem(); say('OEM lighting restored'); }
-        function toggleRainbow() {
-            if (ctl.mode === 'rainbow') { ctl.setMode('static'); setHsv(hsv, 'rainbow off'); say('Rainbow off'); } else { ctl.setMode('rainbow'); say('Rainbow: a full turn every ' + ctl.rainbowPeriodS + ' s'); }
+        async function applyPage() { const p = pageProgram(); if (p) await applyProgram(p); }
+        async function restoreOem() {
+            if (busy) return;
+            busy = true;
+            try {
+                const r = await ctl.restoreOem();
+                say(r.ok ? 'OEM lighting restored' : 'Restore incomplete: ' + r.reason, r.ok ? 2500 : 6000);
+            } finally { busy = false; }
         }
+        function cancelPage() {
+            editor.cancel();
+            if (page === 0 && ctl.program && ctl.program.mode === 'solid') { draft.colours.hsv = hsvOf(ctl.program.colour); draft.colours.brightness = ctl.program.brightness; }
+            if (page === 1 && ctl.program && ctl.program.mode === 'dual') { draft.dual.top = { hsv: hsvOf(ctl.program.top.colour), brightness: ctl.program.top.brightness }; draft.dual.bottom = { hsv: hsvOf(ctl.program.bottom.colour), brightness: ctl.program.bottom.brightness }; }
+            dirty[['colours', 'dual', 'modes'][page]] = false;
+            say('Changes discarded', 1500);
+        }
+        editor.onChange = () => markDirty(['colours', 'dual', 'modes'][page] || 'colours');
+        editor.onDone = (key, confirmed) => {
+            if (confirmed && settings.get('confirmApplies') === 'on' && page <= 2 && /^(wheel|ring)/.test(key)) applyPage();
+        };
 
         /* ---------- settings ---------- */
-        let lastBackend = settings.get('backend') + '|' + settings.get('arm') + '|' + settings.get('unknownVariant');
+        let linkKey = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency')].join('|');
         settings.onChange(async (key) => {
-            const now = settings.get('backend') + '|' + settings.get('arm') + '|' + settings.get('unknownVariant');
-            if (now !== lastBackend) { lastBackend = now; await makeController(); say('Lighting link: ' + ctl.kind); }
+            const now = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency')].join('|');
+            if (now !== linkKey) { linkKey = now; await makeController(); say('Lighting link: ' + ctl.kind); }
             if (key === 'refresh' || !key) ctl.refreshSeconds = Math.max(2, Math.min(254, Number(settings.get('refresh')) || 10));
-            if (key === 'brightness' || !key) ctl.setColour(colour(), { brightness: Number(settings.get('brightness')) || 100, fadeMs: 0 });
-            if (key === 'fade' || !key) ctl.fadeMs = Number(settings.get('fade')) || 0;
-            if (key === 'rainbow' || !key) ctl.rainbowPeriodS = Number(settings.get('rainbow')) || 20;
-            if (key === 'zone' || !key) ctl.setZone(settings.get('zone') || 'all', ZONES[settings.get('zone')] || null);
-            if (key === 'hue' || key === 'sat' || key === 'val') {
-                setHsv({ h: Number(settings.get('hue')), s: Number(settings.get('sat')) / 100, v: Number(settings.get('val')) / 100 }, 'settings');
-            }
-            grabKnob();
+            if (key === 'frame' || !key) ctl.frameMs = Number(settings.get('frame')) || 80;
         });
 
-        /* ---------- the iDrive knob ---------- */
-        function grabKnob() {
-            const want = page === 0 && settings.get('knob') !== 'off' && !!ctx.controller;
-            if (want === knobGrabbed) return;
-            knobGrabbed = want;
-            try { ctx.controller.grab(want); } catch (e) { /* no gate */ }
-        }
-        if (ctx.controller && ctx.controller.onInput) {
-            ctx.controller.onInput((v) => {
-                const k = knob.read(v);
-                if (k.press) { channel = channel === 'h' ? 's' : channel === 's' ? 'v' : 'h'; say('Knob: ' + ({ h: 'hue', s: 'saturation', v: 'value' })[channel], 1500); }
-                if (k.turn) {
-                    const mode = settings.get('knob');
-                    const ch = mode === 'sat' ? 's' : mode === 'val' ? 'v' : mode === 'hue' ? 'h' : channel;
-                    setHsv(C.nudge(hsv, ch, ch === 'h' ? k.turn * 3 : k.turn * 0.02), 'knob');
-                }
-            });
-        }
-
-        /* ---------- touch on the page ---------- */
+        /* ---------- input ---------- */
+        if (ctx.controller && ctx.controller.onInput) ctx.controller.onInput((v) => editor.input(v));
+        let geometry = {};                                     // what the last frame drew, for taps: { wheel, ring, ... }
         ctx.onTap((x, y) => {
-            if (page !== 0) return;
-            const cx = WHEEL.x + WHEEL.size / 2, cy = WHEEL.y + WHEEL.size / 2;
-            const hit = C.wheelHit(x, y, cx, cy, WHEEL.size / 2, { slack: 12 });
-            if (hit) { setHsv({ h: hit.h, s: hit.s, v: hsv.v }, 'wheel'); return; }
-            if (x >= SLIDER.x - 16 && x < SLIDER.x + SLIDER.w + 16 && y >= SLIDER.y && y < SLIDER.y + SLIDER.h) {
-                setHsv({ h: hsv.h, s: hsv.s, v: 1 - (y - SLIDER.y) / SLIDER.h }, 'slider');
+            const g = geometry;
+            if (page === 0) {
+                if (g.wheel) { const hit = C.wheelHit(x, y, g.wheel.cx, g.wheel.cy, g.wheel.r, { slack: 12 }); if (hit) { draft.colours.hsv = { h: hit.h, s: hit.s, v: draft.colours.hsv.v }; markDirty('colours'); return; } }
+                if (g.ring) { const v = W.ringHit(x, y, g.ring); if (v != null) { draft.colours.brightness = v; markDirty('colours'); } }
+            } else if (page === 1) {
+                for (const side of ['top', 'bottom']) {
+                    const w = g['wheel_' + side], r = g['ring_' + side];
+                    if (w) { const hit = C.wheelHit(x, y, w.cx, w.cy, w.r, { slack: 10 }); if (hit) { draft.dual[side].hsv = { h: hit.h, s: hit.s, v: draft.dual[side].hsv.v }; draft.dual.focus = side; markDirty('dual'); return; } }
+                    if (r) { const v = W.ringHit(x, y, r, 20); if (v != null) { draft.dual[side].brightness = v; draft.dual.focus = side; markDirty('dual'); return; } }
+                }
             }
         });
-        ctx.onTab((i) => { page = i; deleteMode = false; grabKnob(); });
-        ctx.ui.onClick('BTN_CUSTOM', toggleCustom);
+        ctx.onTab((i) => { editor.cancel(); page = i; deleteMode = false; });
+        ctx.ui.onClick('BTN_APPLY', () => { if (page <= 2) applyPage(); else say('Nothing to apply on this page', 1500); });
         ctx.ui.onClick('BTN_OEM', restoreOem);
-        ctx.ui.onClick('BTN_PAGE', () => { page = (page + 1) % PAGES.length; deleteMode = false; grabKnob(); });
-        ctx.app && ctx.app.on && ctx.app.on('shutdown', () => { ctl.shutdown(); });
-        grabKnob();
-        // for the tests and the preview script (tests/node/ui_harness.js): a look inside
-        ctx.__ambient = { ctl: () => ctl, hsv: () => hsv, page: () => page, favs, setHsv, channel: () => channel };
+        ctx.ui.onClick('BTN_PAGE', () => { editor.cancel(); page = (page + 1) % PAGES.length; deleteMode = false; });
+        if (ctx.app && ctx.app.on) ctx.app.on('shutdown', () => { ctl.shutdown(); });
+        ctx.__ambient = { ctl: () => ctl, draft, editor, favs, page: () => page, setPage: (i) => { page = i; }, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
 
-        /* ---------- drawing ---------- */
-        const linkPill = (cv, t, x, y) => {
+        /* ---------- drawing helpers ---------- */
+        const linkPill = (cv, t, x, y, w) => {
             const st = ctl.state, kind = ctl.kind;
-            const label = kind === 'mock' ? 'SIMULATED BDC' : kind === 'bdc-uds' ? (st === 'connected' ? 'BDC LINKED' : st === 'connecting' ? 'BDC PROBING' : 'BDC NO LINK') : 'SOME/IP PROBE';
-            const color = kind === 'mock' ? t.cold : st === 'connected' ? t.ok : st === 'connecting' ? t.warn : t.crit;
-            return G.pill(cv, t, x, y, 210, 34, label, { color, size: 17 });
+            const label = kind === 'mock' ? 'SIMULATED' : kind === 'bdc-uds' ? (st === 'connected' ? (ctl.armed ? 'BDC LINKED' : 'BDC (DRY RUN)') : st === 'connecting' ? 'PROBING' : 'NO LINK') : 'SOME/IP';
+            const color = kind === 'mock' ? t.cold : st === 'connected' ? (ctl.armed ? t.ok : t.warn) : t.crit;
+            return G.pill(cv, t, x, y, w || 170, 32, label, { color, size: 15 });
         };
-        const customPill = (cv, t, x, y) => {
-            const armed = ctl.kind !== 'bdc-uds' || ctl.armed;
-            const label = ctl.custom ? (armed ? 'CUSTOM ON' : 'CUSTOM (DRY RUN)') : 'OEM LIGHTING';
-            return G.pill(cv, t, x, y, 210, 34, label, { color: ctl.custom ? (armed ? t.accent : t.warn) : t.dim, size: 17 });
+        const statePill = (cv, t, x, y, w) => {
+            const p = ctl.program;
+            const label = !p ? 'OEM LIGHTING' : (S.MODE_LABELS[p.mode] || p.mode).toUpperCase() + (S.isAnimated(p) ? ' ' + ctl.fps() + ' FPS' : '');
+            return G.pill(cv, t, x, y, w || 190, 32, label, { color: p ? t.accent : t.dim, size: 15 });
         };
+        const applyRow = (cv, t, x, y, h, label, isDirty) => {
+            let ax = x;
+            ax += G.button(cv, t, ax, y, 0, h, label || 'Apply', applyPage, { primary: true, key: 'apply', busy }) + 10;
+            ax += G.button(cv, t, ax, y, 0, h, 'Cancel', cancelPage, { key: 'cancel', busy: !isDirty }) + 10;
+            ax += G.button(cv, t, ax, y, 0, h, 'Restore OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program }) + 10;
+            return ax;
+        };
+        const wheelControl = (key, get, set) => editor.control({ key, get, set, step: 3, wrap: 360 });
+        const ringControl = (key, get, set) => editor.control({ key, get, set, step: 2, min: 0, max: 100 });
+        const enter = (key) => () => { if (!editor.enter(key)) return; if (!editor.available) say('Turn the knob: no controller gate, use + / -', 2000); };
 
-        function drawColour(cv, t) {
-            const c = colour(), hex = C.rgbToHex(c);
-            // the wheel and its marker
-            cv.circle(WHEEL.x + WHEEL.size / 2, WHEEL.y + WHEEL.size / 2, WHEEL.size / 2 + 6, withAlpha('#ffffff', 0.08));
-            cv.blit(wheelLayer(), WHEEL.x - 1, WHEEL.y - 1);
-            const m = C.wheelPos(hsv.h, hsv.s, WHEEL.x + WHEEL.size / 2, WHEEL.y + WHEEL.size / 2, WHEEL.size / 2);
-            cv.circle(m.x, m.y, 15, '#000000'); cv.circle(m.x, m.y, 12, '#ffffff'); cv.circle(m.x, m.y, 9, C.rgbToHex(C.hsvToRgb(hsv.h, hsv.s, 1)));
-            // value slider
-            cv.gradientRect(SLIDER.x, SLIDER.y, SLIDER.w, SLIDER.h, [[0, C.rgbToHex(C.hsvToRgb(hsv.h, hsv.s, 1))], [1, '#000000']]);
-            cv.strokeRoundRect(SLIDER.x, SLIDER.y, SLIDER.w, SLIDER.h, 4, 1.5, withAlpha('#ffffff', 0.3));
-            const sy = SLIDER.y + (1 - hsv.v) * SLIDER.h;
-            cv.roundRect(SLIDER.x - 8, sy - 4, SLIDER.w + 16, 8, 4, '#ffffff');
-            cv.text('VALUE', SLIDER.x + SLIDER.w / 2, SLIDER.y + SLIDER.h + 26, 16, t.dim, { align: 'center', font: 'bold', spacing: 2 });
-            // right panel: preview, numbers, status, buttons
-            const P = RIGHT;
+        /* ---------- COLOURS ---------- */
+        function drawColours(cv, t) {
+            editor.reset();
+            const d = draft.colours, c = rgbOf(d.hsv), hex = C.rgbToHex(c);
+            wheelControl('wheel', () => d.hsv.h, (h) => { d.hsv.h = h; });
+            ringControl('ring', () => d.brightness, (v) => { d.brightness = v; });
+            editor.control({ key: 'sat', get: () => Math.round(d.hsv.s * 100), set: (v) => { d.hsv.s = v / 100; }, step: 5, min: 0, max: 100 });
+            // the wheel
+            geometry.wheel = W.wheel(cv, t, 60, 62, 396, d.hsv, { focused: false, editing: editor.isEditing('wheel') });
+            cv.target(60, 62, 396, 396, enter('wheel'), 'wheel');
+            // the brightness dial
+            geometry.ring = W.ring(cv, t, 600, 250, 118, d.brightness, 'Brightness', { editing: editor.isEditing('ring'), colour: hex, ramp: true });
+            cv.target(600 - 150, 100, 300, 300, enter('ring'), 'ring');
+            G.button(cv, t, 540, 418, 54, 40, '-', () => { d.brightness = Math.max(0, d.brightness - 5); markDirty('colours'); }, { key: 'ring-' });
+            G.button(cv, t, 606, 418, 54, 40, '+', () => { d.brightness = Math.min(100, d.brightness + 5); markDirty('colours'); }, { key: 'ring+' });
+            // right panel: preview and numbers
+            const P = { x: 800, y: 60, w: 780, h: 452 };
             G.panel(cv, t, P.x, P.y, P.w, P.h);
-            cv.roundRect(P.x + 24, P.y + 24, 300, 190, 18, hex);
-            cv.strokeRoundRect(P.x + 24, P.y + 24, 300, 190, 18, 2, withAlpha('#ffffff', 0.25));
-            cv.text(hex, P.x + 174, P.y + 130, 44, C.luma(c) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'num' });
-            cv.text('SELECTED', P.x + 174, P.y + 190, 15, C.luma(c) > 0.55 ? '#333333' : '#dddddd', { align: 'center', font: 'bold', spacing: 2 });
-            // what the lights show (the mock knows; the car's BDC only through the last accepted write)
-            const phys = ctl.physicalColour ? ctl.physicalColour() : (ctl.custom && ctl.stats.accepted ? Object.assign({ source: 'custom' }, ctl.colour) : { r: 0, g: 0, b: 0, source: 'oem' });
-            const ph = C.rgbToHex(phys);
-            cv.roundRect(P.x + 344, P.y + 24, 140, 90, 14, phys.source === 'oem' ? withAlpha('#ffffff', 0.08) : ph);
-            cv.strokeRoundRect(P.x + 344, P.y + 24, 140, 90, 14, 1.5, withAlpha('#ffffff', 0.25));
-            cv.text(phys.source === 'oem' ? 'OEM' : phys.source === 'off' ? 'OFF' : ph, P.x + 414, P.y + 76, 20, phys.source === 'oem' || C.luma(phys) <= 0.55 ? '#ffffff' : '#000000', { align: 'center', font: 'bold' });
-            cv.text('LIGHTS NOW', P.x + 414, P.y + 136, 14, t.dim, { align: 'center', font: 'bold', spacing: 2 });
-            G.readout(cv, t, P.x + 344, P.y + 150, { label: 'RGB', text: c.r + ' ' + c.g + ' ' + c.b, size: 30 });
-            G.readout(cv, t, P.x + 520, P.y + 24, { label: 'HUE', text: Math.round(hsv.h) + '°', size: 36, color: channel === 'h' ? 'accent' : 'text' });
-            G.readout(cv, t, P.x + 680, P.y + 24, { label: 'SAT', text: Math.round(hsv.s * 100) + '%', size: 36, color: channel === 's' ? 'accent' : 'text' });
-            G.readout(cv, t, P.x + 830, P.y + 24, { label: 'VAL', text: Math.round(hsv.v * 100) + '%', size: 36, color: channel === 'v' ? 'accent' : 'text' });
-            // nudge buttons (targets: a tap, or the controller turned onto them and pressed)
-            let bx = P.x + 520;
-            const by = P.y + 112;
-            [['H-', 'h', -5], ['H+', 'h', 5], ['S-', 's', -0.05], ['S+', 's', 0.05], ['V-', 'v', -0.05], ['V+', 'v', 0.05]].forEach((n) => {
-                bx += G.button(cv, t, bx, by, 66, 44, n[0], () => setHsv(C.nudge(hsv, n[1], n[2]), 'button'), { key: 'nudge' + n[0] }) + 8;
-            });
-            linkPill(cv, t, P.x + 520, P.y + 172);
-            customPill(cv, t, P.x + 740, P.y + 172);
-            // OEM library colours as chips
-            cv.text('BDC LIBRARY', P.x + 24, P.y + 250, 15, t.dim, { font: 'bold', spacing: 2 });
+            W.swatch(cv, t, P.x + 24, P.y + 22, 330, 170, c, dirty.colours ? 'preview (not applied)' : 'preview', { editing: editor.isEditing('wheel') });
+            G.readout(cv, t, P.x + 380, P.y + 22, { label: 'RGB', text: c.r + ' ' + c.g + ' ' + c.b, size: 30 });
+            G.readout(cv, t, P.x + 380, P.y + 100, { label: 'HUE', text: Math.round(d.hsv.h) + '°', size: 30, color: editor.isEditing('wheel') ? 'accent' : 'text' });
+            G.readout(cv, t, P.x + 540, P.y + 100, { label: 'BRIGHT', text: d.brightness + '%', size: 30, color: editor.isEditing('ring') ? 'accent' : 'text' });
+            W.stepper(cv, t, P.x + 434, P.y + 200, 120, 'Saturation', Math.round(d.hsv.s * 100) + '%', () => { d.hsv.s = Math.max(0, d.hsv.s - 0.05); markDirty('colours'); }, () => { d.hsv.s = Math.min(1, d.hsv.s + 0.05); markDirty('colours'); }, 'sat', { editing: editor.isEditing('sat') });
+            cv.target(P.x + 434, P.y + 200, 120, 46, enter('sat'), 'sat');
+            // zone picker
+            cv.text('APPLIES TO', P.x + 24, P.y + 216, 13, t.dim, { font: 'bold', spacing: 2 });
+            G.button(cv, t, P.x + 24, P.y + 226, 330, 44, S.zoneLabel(zoneName(), ctl.slaves) + '  ›', () => { d.zone = (d.zone + 1) % ZONE_ORDER.length; markDirty('colours'); }, { key: 'zone' });
+            // library chips
+            cv.text('BDC LIBRARY', P.x + 24, P.y + 300, 13, t.dim, { font: 'bold', spacing: 2 });
             let cx = P.x + 24;
             favs.oem().forEach((f) => {
                 const rc = C.hexToRgb(f.hex);
-                cv.roundRect(cx, P.y + 262, 120, 44, 10, f.hex);
-                if (C.sameRgb(rc, c)) cv.strokeRoundRect(cx, P.y + 262, 120, 44, 10, 3, '#ffffff');
-                cv.text(f.name.toUpperCase(), cx + 60, P.y + 290, 14, C.luma(rc) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'bold', spacing: 1.5 });
-                cv.target(cx, P.y + 262, 120, 44, () => setRgb(rc, 'library ' + f.name), 'oem:' + f.hex);
-                cx += 128;
+                cv.roundRect(cx, P.y + 310, 118, 40, 10, f.hex);
+                if (C.sameRgb(rc, c)) cv.strokeRoundRect(cx, P.y + 310, 118, 40, 10, 3, '#ffffff');
+                cv.text(f.name.toUpperCase(), cx + 59, P.y + 336, 13, C.luma(rc) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'bold', spacing: 1.5 });
+                cv.target(cx, P.y + 310, 118, 40, () => { d.hsv = hsvOf(rc); markDirty('colours'); }, 'oem:' + f.hex);
+                cx += 126;
             });
             // actions
-            const ay = P.y + 330;
-            let ax = P.x + 24;
-            ax += G.button(cv, t, ax, ay, 0, 52, ctl.custom ? 'Custom off' : 'Apply to lights', toggleCustom, { primary: !ctl.custom, key: 'custom' }) + 12;
-            ax += G.button(cv, t, ax, ay, 0, 52, 'Restore OEM', restoreOem, { key: 'oem' }) + 12;
-            ax += G.button(cv, t, ax, ay, 0, 52, favs.has(hex) ? 'Saved' : 'Save favourite', () => { if (favs.add(hex)) say('Saved ' + hex); }, { key: 'save', busy: favs.has(hex) }) + 12;
-            ax += G.button(cv, t, ax, ay, 0, 52, ctl.mode === 'rainbow' ? 'Rainbow off' : 'Rainbow', toggleRainbow, { key: 'rainbow', color: ctl.mode === 'rainbow' ? t.warn : undefined }) + 12;
-            const zoneText = ctl.zone === 'all' ? 'all ' + ctl.slaves.length + ' modules' : ctl.zone + ' (' + ctl.selected().length + ' of ' + ctl.slaves.length + ')';
-            const note = ctl.kind === 'bdc-uds' && !ctl.armed ? 'Disarmed: writes are logged, not sent (Settings > Write to the car)' : ctl.kind === 'mock' ? 'Simulated body controller: nothing reaches the car (Settings > Lighting link)' : ctl.lastError ? String(ctl.lastError) : 'Zone: ' + zoneText + ', fade ' + ctl.fadeMs + ' ms, round ' + (ctl.stats.avgRoundMs == null ? '-' : ctl.stats.avgRoundMs + ' ms') + ', ZEIT ' + ctl.refreshSeconds + ' s';
-            cv.text(note, P.x + 24, P.y + 420, 17, t.dim);
-            if (parked && parked.moving()) G.pill(cv, t, P.x + P.w - 150, P.y + 400, 126, 30, 'DRIVING', { color: t.warn, size: 15 });
+            let ax = applyRow(cv, t, P.x + 24, P.y + 372, 50, 'Apply', dirty.colours);
+            G.button(cv, t, ax, P.y + 372, 0, 50, favs.has(hex) ? 'Saved' : 'Save colour', () => { if (favs.add(hex)) say('Saved ' + hex); }, { key: 'save', busy: favs.has(hex) });
+            linkPill(cv, t, P.x + 24, P.y + 432); statePill(cv, t, P.x + 204, P.y + 432, 220);
+            const note = ctl.kind === 'bdc-uds' && !ctl.armed ? 'Disarmed: Apply logs the bytes, nothing is sent' : dirty.colours ? 'Preview only: Apply (or press the knob) sends it' : ctl.program ? 'Applied: ' + S.describe(ctl.program, ctl.slaves) : 'Factory lighting';
+            cv.text(note, P.x + 440, P.y + 454, 15, t.dim);
         }
 
+        /* ---------- DUAL ---------- */
+        function drawDual(cv, t) {
+            editor.reset();
+            const d = draft.dual;
+            ['top', 'bottom'].forEach((side, i) => {
+                const x0 = 40 + i * 540, s = d[side], col = rgbOf(s.hsv), hex = C.rgbToHex(col);
+                wheelControl('wheel_' + side, () => s.hsv.h, (h) => { s.hsv.h = h; d.focus = side; });
+                ringControl('ring_' + side, () => s.brightness, (v) => { s.brightness = v; d.focus = side; });
+                G.panel(cv, t, x0 - 20, 60, 520, 452, side === 'top' ? 'Upper lighting' : 'Lower lighting');
+                geometry['wheel_' + side] = W.wheel(cv, t, x0 + 10, 112, 300, s.hsv, { editing: editor.isEditing('wheel_' + side) });
+                cv.target(x0 + 10, 112, 300, 300, enter('wheel_' + side), 'wheel_' + side);
+                geometry['ring_' + side] = W.ring(cv, t, x0 + 410, 262, 70, s.brightness, 'Bright', { editing: editor.isEditing('ring_' + side), colour: hex, width: 14, size: 34 });
+                cv.target(x0 + 330, 182, 160, 160, enter('ring_' + side), 'ring_' + side);
+                G.button(cv, t, x0 + 352, 350, 46, 36, '-', () => { s.brightness = Math.max(0, s.brightness - 5); markDirty('dual'); }, { key: 'ring_' + side + '-' });
+                G.button(cv, t, x0 + 416, 350, 46, 36, '+', () => { s.brightness = Math.min(100, s.brightness + 5); markDirty('dual'); }, { key: 'ring_' + side + '+' });
+                W.swatch(cv, t, x0 + 330, 112, 160, 60, col, null, { size: 22, radius: 12, editing: editor.isEditing('wheel_' + side) });
+                cv.text(col.r + ' ' + col.g + ' ' + col.b, x0 + 410, 196, 15, t.dim, { align: 'center', font: 'num' });
+                const n = ctl.slaves.filter((m) => S.groupOf(m, settings.get('handles') || 'bottom') === side).length;
+                cv.text(n + ' modules', x0 + 160, 440, 15, t.dim, { align: 'center' });
+            });
+            // the middle column: swap / copy / save / apply
+            const mx = 1130, my = 60;
+            G.panel(cv, t, mx, my, 450, 452, 'Dual Colour');
+            const prev = (side, y) => { const col = rgbOf(d[side].hsv); W.swatch(cv, t, mx + 24, y, 190, 64, col, side === 'top' ? 'upper ' + d[side].brightness + '%' : 'lower ' + d[side].brightness + '%', { size: 20, radius: 12 }); };
+            prev('top', my + 50); prev('bottom', my + 124);
+            let by = my + 50;
+            const bw = 190, bx = mx + 236;
+            G.button(cv, t, bx, by, bw, 44, 'Swap', () => { const a = clone(d.top); d.top = clone(d.bottom); d.bottom = a; markDirty('dual'); }, { key: 'swap' }); by += 54;
+            G.button(cv, t, bx, by, bw, 44, 'Copy top down', () => { d.bottom = clone(d.top); markDirty('dual'); }, { key: 'copy' }); by += 54;
+            G.button(cv, t, bx, by, bw, 44, 'Save combination', () => { const p = favs.addPreset('Dual ' + C.rgbToHex(rgbOf(d.top.hsv)) + '/' + C.rgbToHex(rgbOf(d.bottom.hsv)), dualProgram()); say('Saved ' + p.name); }, { key: 'savecombo' }); by += 54;
+            G.button(cv, t, bx, by, bw, 44, 'Handles: ' + (settings.get('handles') || 'bottom'), () => { const o = ['top', 'bottom', 'off']; settings.set('handles', o[(o.indexOf(settings.get('handles') || 'bottom') + 1) % 3]); markDirty('dual'); }, { key: 'handles' }); by += 64;
+            G.button(cv, t, mx + 24, by, 0, 50, 'Apply both', () => applyProgram(dualProgram(), 'Applied upper and lower'), { primary: true, key: 'apply' });
+            G.button(cv, t, mx + 190, by, 0, 50, 'Cancel', cancelPage, { key: 'cancel', busy: !dirty.dual });
+            G.button(cv, t, mx + 316, by, 0, 50, 'OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program });
+            linkPill(cv, t, mx + 24, my + 400); statePill(cv, t, mx + 204, my + 400, 220);
+            cv.text(dirty.dual ? 'Preview only until Apply both' : ctl.program && ctl.program.mode === 'dual' ? 'Applied' : 'Not applied', mx + 24, my + 448, 14, t.dim);
+        }
+
+        /* ---------- MODES ---------- */
+        const MODE_PARAMS = {
+            rainbow: [['periodS', 'Seconds per turn', 1, 2, 120], ['brightness', 'Brightness %', 5, 0, 100]],
+            fade: [['transitionMs', 'Transition ms', 250, 250, 10000], ['holdMs', 'Hold ms', 250, 0, 10000], ['brightness', 'Brightness %', 5, 0, 100]],
+            breathing: [['minBrightness', 'Min %', 5, 0, 100], ['maxBrightness', 'Max %', 5, 0, 100], ['periodS', 'Seconds per breath', 1, 1, 30]],
+            wave: [['periodS', 'Seconds per wave', 1, 2, 60], ['hueSpan', 'Hue span', 10, 10, 180], ['baseHue', 'Base hue', 10, 0, 350], ['brightness', 'Brightness %', 5, 0, 100]],
+            solid: [['brightness', 'Brightness %', 5, 0, 100]],
+            dual: [],
+        };
+        function drawModes(cv, t) {
+            editor.reset();
+            const d = draft.modes, mode = MODE_ORDER[d.mode], params = d.params[mode];
+            G.panel(cv, t, 20, 60, 440, 452, 'Lighting mode');
+            MODE_ORDER.forEach((m, i) => {
+                const y = 108 + i * 60, on = i === d.mode, applied = ctl.program && ctl.program.mode === m;
+                cv.roundRect(36, y, 408, 50, 12, on ? withAlpha(t.sel || t.accent, 0.25) : withAlpha('#ffffff', 0.05));
+                if (on) cv.strokeRoundRect(36, y, 408, 50, 12, 2, t.sel || t.accent);
+                cv.text(S.MODE_LABELS[m], 56, y + 32, 22, t.text, { font: 'bold' });
+                if (applied) G.pill(cv, t, 330, y + 10, 100, 30, 'ACTIVE', { color: t.accent, size: 13 });
+                cv.target(36, y, 408, 50, () => { d.mode = i; markDirty('modes'); }, 'mode:' + m);
+            });
+            // the selected mode's settings
+            const P = { x: 480, y: 60, w: 1100, h: 452 };
+            G.panel(cv, t, P.x, P.y, P.w, P.h, S.MODE_LABELS[mode]);
+            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'All colours in turn, slowly.', fade: 'Glides from colour to colour through the palette, holding each.', breathing: 'The brightness rises and falls between the limits.', wave: 'A hue wave travelling from the dashboard to the rear.' }[mode];
+            cv.text(help, P.x + 24, P.y + 60, 17, t.dim);
+            let px = P.x + 80, py = P.y + 120;
+            (MODE_PARAMS[mode] || []).forEach((row) => {
+                const [k, label, step, min, max] = row;
+                const get = () => Number(params[k]), set = (v) => { params[k] = Math.max(min, Math.min(max, v)); markDirty('modes'); };
+                editor.control({ key: 'p:' + k, get, set, step, min, max });
+                W.stepper(cv, t, px, py, 150, label, get(), () => set(get() - step), () => set(get() + step), 'p:' + k, { editing: editor.isEditing('p:' + k) });
+                cv.target(px, py, 150, 46, enter('p:' + k), 'p:' + k);
+                px += 290;
+                if (px > P.x + P.w - 220) { px = P.x + 80; py += 90; }
+            });
+            if (mode === 'fade') {
+                cv.text('PALETTE', P.x + 24, P.y + 300, 13, t.dim, { font: 'bold', spacing: 2 });
+                let cx = P.x + 24;
+                params.colours.forEach((col, i) => {
+                    cv.roundRect(cx, P.y + 310, 70, 40, 8, C.rgbToHex(col));
+                    cv.target(cx, P.y + 310, 70, 40, () => { params.colours.splice(i, 1); if (!params.colours.length) params.colours.push({ r: 254, g: 0, b: 0 }); markDirty('modes'); }, 'pal:' + i);
+                    cx += 78;
+                });
+                G.button(cv, t, cx + 10, P.y + 308, 0, 44, 'Add current colour', () => { if (params.colours.length < 8) { params.colours.push(rgbOf(draft.colours.hsv)); markDirty('modes'); } }, { key: 'addcol' });
+            }
+            if (mode === 'breathing' || mode === 'solid') {
+                const col = mode === 'breathing' ? params.colour : rgbOf(draft.colours.hsv);
+                W.swatch(cv, t, P.x + 24, P.y + 300, 200, 60, col, 'colour', { size: 20, radius: 12 });
+                G.button(cv, t, P.x + 240, P.y + 308, 0, 44, 'Use Colours page colour', () => { if (mode === 'breathing') params.colour = rgbOf(draft.colours.hsv); else { params.colour = rgbOf(draft.colours.hsv); } markDirty('modes'); }, { key: 'usecol' });
+            }
+            if (mode === 'wave') {
+                const rps = ctl.scheduler.stats.avgLatencyMs ? Math.round(1000 / (ctl.scheduler.stats.avgLatencyMs * Math.max(1, ctl.slaves.length))) : null;
+                cv.text('Needs a few frames a second across the cabin: ' + (rps == null ? 'throughput not measured yet' : 'about ' + rps + ' frames/s with this link') + (rps != null && rps < 2 ? ' (too slow for a smooth wave)' : ''), P.x + 24, P.y + 300, 15, rps != null && rps < 2 ? t.warn : t.dim);
+            }
+            const sx = applyRow(cv, t, P.x + 24, P.y + 372, 50, S.isAnimated({ mode }) ? 'Start ' + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
+            G.button(cv, t, sx, P.y + 372, 0, 50, 'Save as preset', () => { const p = favs.addPreset(S.MODE_LABELS[mode] + ' ' + new Date().toISOString().slice(11, 16), modesProgram()); say('Saved ' + p.name); }, { key: 'savepreset' });
+            linkPill(cv, t, P.x + 24, P.y + 432); statePill(cv, t, P.x + 204, P.y + 432, 260);
+        }
+
+        /* ---------- FAVOURITES ---------- */
         function drawFavourites(cv, t) {
-            G.panel(cv, t, 20, 60, 1560, 452, 'Favourites');
+            editor.reset();
+            G.panel(cv, t, 20, 60, 760, 452, 'Saved colours');
             const items = favs.list();
-            const c = colour(), hex = C.rgbToHex(c);
-            if (!items.length) cv.text('No favourites yet: pick a colour on the Colour page and press Save favourite.', 44, 130, 22, t.dim);
-            let x = 44, y = 110;
+            if (!items.length) cv.text('Save a colour on the Colours page.', 44, 120, 18, t.dim);
+            let x = 44, y = 106;
             items.forEach((f) => {
                 const rc = C.hexToRgb(f.hex);
-                cv.roundRect(x, y, 180, 72, 12, f.hex);
-                if (f.hex === hex) cv.strokeRoundRect(x, y, 180, 72, 12, 3, '#ffffff');
-                cv.text(f.hex, x + 90, y + 44, 20, C.luma(rc) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'bold' });
-                if (deleteMode) cv.text('TAP TO DELETE', x + 90, y + 64, 12, C.luma(rc) > 0.55 ? '#330000' : '#ffbbbb', { align: 'center', font: 'bold', spacing: 1.5 });
-                cv.target(x, y, 180, 72, () => { if (deleteMode) { favs.remove(f.hex); say('Removed ' + f.hex); } else setRgb(rc, 'favourite'); }, 'fav:' + f.hex);
-                x += 192; if (x + 180 > 1560) { x = 44; y += 84; }
+                cv.roundRect(x, y, 170, 60, 12, f.hex);
+                cv.text(f.hex, x + 85, y + 36, 18, C.luma(rc) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'bold' });
+                if (deleteMode) cv.text('TAP TO DELETE', x + 85, y + 53, 11, C.luma(rc) > 0.55 ? '#330000' : '#ffbbbb', { align: 'center', font: 'bold', spacing: 1.5 });
+                cv.target(x, y, 170, 60, () => { if (deleteMode) { favs.remove(f.hex); say('Removed ' + f.hex); } else { draft.colours.hsv = hsvOf(rc); markDirty('colours'); page = 0; say('Colour loaded: Apply to use it', 2000); } }, 'fav:' + f.hex);
+                x += 180; if (x + 170 > 780) { x = 44; y += 70; }
             });
-            let ax = 44;
-            const ay = 440;
-            ax += G.button(cv, t, ax, ay, 0, 48, favs.has(hex) ? 'Current saved' : 'Save current ' + hex, () => { if (favs.add(hex)) say('Saved ' + hex); }, { primary: !favs.has(hex), key: 'save2', busy: favs.has(hex) }) + 12;
-            ax += G.button(cv, t, ax, ay, 0, 48, deleteMode ? 'Done deleting' : 'Delete...', () => { deleteMode = !deleteMode; }, { key: 'del', color: deleteMode ? t.crit : undefined }) + 12;
-            ax += G.button(cv, t, ax, ay, 0, 48, ctl.custom ? 'Custom off' : 'Apply to lights', toggleCustom, { key: 'custom2' }) + 12;
+            G.panel(cv, t, 800, 60, 780, 452, 'Saved configurations');
+            const cfg = favs.presets();
+            if (!cfg.length) cv.text('Save a combination on the Dual page or a preset on the Modes page.', 824, 120, 17, t.dim);
+            let cy = 106;
+            cfg.slice(0, 6).forEach((p) => {
+                cv.roundRect(824, cy, 730, 52, 12, withAlpha('#ffffff', 0.06));
+                const prog = p.program;
+                if (prog.mode === 'dual') { cv.roundRect(834, cy + 8, 36, 36, 8, C.rgbToHex(prog.top.colour)); cv.roundRect(874, cy + 8, 36, 36, 8, C.rgbToHex(prog.bottom.colour)); } else if (prog.colour) cv.roundRect(834, cy + 8, 76, 36, 8, C.rgbToHex(prog.colour)); else { cv.roundRect(834, cy + 8, 76, 36, 8, withAlpha(t.accent, 0.3)); }
+                cv.text(p.name, 924, cy + 24, 18, t.text, { font: 'bold' });
+                cv.text(S.describe(prog, ctl.slaves).slice(0, 70), 924, cy + 44, 13, t.dim);
+                cv.target(824, cy, 560, 52, () => { if (deleteMode) { favs.removePreset(p.name); say('Removed ' + p.name); } else applyProgram(prog, 'Applied ' + p.name); }, 'cfg:' + p.name);
+                G.button(cv, t, 1400, cy + 6, 0, 40, deleteMode ? 'Delete' : 'Apply', () => { if (deleteMode) { favs.removePreset(p.name); say('Removed ' + p.name); } else applyProgram(prog, 'Applied ' + p.name); }, { key: 'cfgbtn:' + p.name, color: deleteMode ? t.crit : undefined });
+                cy += 60;
+            });
+            G.button(cv, t, 44, 456, 0, 44, deleteMode ? 'Done deleting' : 'Delete...', () => { deleteMode = !deleteMode; }, { key: 'del', color: deleteMode ? t.crit : undefined });
+            G.button(cv, t, 824, 456, 0, 44, 'Save current as preset', () => { if (!ctl.program) { say('Nothing applied to save', 2000); return; } const p = favs.addPreset(S.MODE_LABELS[ctl.program.mode] + ' ' + new Date().toISOString().slice(11, 16), ctl.program); say('Saved ' + p.name); }, { key: 'savecur', busy: !ctl.program });
+            G.button(cv, t, 1120, 456, 0, 44, 'Restore OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program });
         }
 
+        /* ---------- DIAGNOSTICS ---------- */
         function drawDiagnostics(cv, t) {
-            const s = ctl.status(), caps = s.capabilities || {};
+            editor.reset();
+            const s = ctl.status(), caps = s.capabilities || {}, sc = s.scheduler || {};
             G.panel(cv, t, 20, 60, 760, 452, 'Lighting link');
             const rows = [
-                ['Link', s.kind === 'mock' ? 'simulated BDC' : s.kind === 'bdc-uds' ? 'BDC over TASU (UDS)' : 'SOME/IP probe'],
+                ['Link', s.kind === 'mock' ? 'simulated BDC' + (ctl.latencyMs ? ' (' + ctl.latencyMs + ' ms per write)' : '') : s.kind === 'bdc-uds' ? 'BDC over TASU (UDS)' : 'SOME/IP probe'],
                 ['State', s.state + (s.lastError ? ' - ' + s.lastError : '')],
-                ['Armed', s.kind === 'bdc-uds' ? (s.armed ? 'YES: writes go to the car' : 'no: dry runs (' + (s.dryRuns || 0) + ')') : 'n/a'],
-                ['BDC variant', caps.variant ? caps.variant.index + ' ' + (caps.variant.sgbd || '?') : (caps.bdcReachable === false ? 'no answer to 22 F1 50' : '-')],
-                ['RGB actuator', caps.rgbActuator || '-'],
-                ['LIN slaves', String(s.slaves.length) + (caps.verified && caps.verified.lin1Status ? ' (from the car)' : s.kind === 'mock' ? ' (simulated)' : '')],
-                ['Writes', s.stats.writes + ' sent, ' + s.stats.accepted + ' accepted, ' + s.stats.rejected + ' rejected, ' + s.stats.timeouts + ' timeouts'],
-                ['Keep-alive', 'ZEIT ' + s.refreshSeconds + ' s, keep-alive at ' + Math.round(s.refreshSeconds * ctl.keepAliveFactor) + ' s minus the round; round ' + (s.stats.avgRoundMs == null ? '-' : s.stats.avgRoundMs + ' ms avg, ' + s.stats.lastRoundMs + ' ms last')],
-                ['Zone / mode', s.zone + ' (' + s.selected + ' modules), ' + s.mode + (s.fading ? ', fading' : '') + ', fade ' + s.fadeMs + ' ms'],
-                ['Last request', s.lastRequest || (s.history.length ? s.history[s.history.length - 1].bytes || '-' : '-')],
-                ['Last reply', s.lastReply || '-'],
+                ['Armed', s.kind === 'bdc-uds' ? (ctl.armed ? 'YES: writes go to the car' : 'no: dry runs (' + (ctl.dryRuns || 0) + ')') : 'n/a'],
+                ['BDC variant', caps.variant ? caps.variant.index + ' ' + (caps.variant.sgbd || '?') + ' (' + caps.rgbActuator + ')' : '-'],
+                ['Modules', s.slaves.length + ' (' + s.slaves.filter((m) => m.bus === 1).length + ' on bus 1, ' + s.slaves.filter((m) => m.bus === 2).length + ' on bus 2), ' + s.driven + ' driven'],
+                ['Applied', s.description],
+                ['Writes', (sc.writes || 0) + ' sent, ' + (sc.accepted || 0) + ' ok, ' + (sc.rejected || 0) + ' refused, ' + (sc.busy || 0) + ' busy, ' + (sc.timeouts || 0) + ' timeouts, ' + (sc.skipped || 0) + ' skipped'],
+                ['Transport', (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
+                ['Keep-alive', 'ZEIT ' + s.refreshSeconds + ' s, refresh at ' + Math.round(s.refreshSeconds * ctl.keepAliveFactor) + ' s; ' + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
+                ['Animation', s.animated ? s.fps + ' frames/s, ' + s.stats.frames + ' frames, ' + s.stats.framesDropped + ' dropped' : 'none'],
+                ['Parking', s.parkedPolicy + (parked ? ', speed ' + (parked.speed() == null ? 'unknown' : Math.round(parked.speed()) + ' km/h') : ', no speed signal')],
             ];
-            G.table(cv, t, 36, 100, 730, [{ w: 170, title: '' }, { w: 560, title: '' }], rows, { rowH: 31, size: 18 });
-            G.panel(cv, t, 800, 60, 780, 220, 'Control paths');
-            const approaches = [
-                ['SOME/IP lighting service', 'unknown: not in any public source; search the unit catalog'],
-                ['BDC actuator 2E DA5E / E3D1', caps.rgbActuator === 'verified' ? 'verified on this car over ENET (2026-11-04)' + (s.stats.accepted && s.kind === 'bdc-uds' && s.armed ? '; accepted over TASU' : '') : caps.rgbActuator === 'documented' ? 'documented for this variant; unverified' : s.kind === 'mock' ? 'simulated' : 'variant ' + (caps.rgbActuator || 'unknown')],
-                ['BDC coding 360A (persistent)', 'not used: needs recoding per change'],
-            ];
-            G.table(cv, t, 816, 100, 750, [{ w: 300, title: '' }, { w: 450, title: '' }], approaches, { rowH: 34, size: 18 });
-            G.panel(cv, t, 800, 292, 780, 220, 'LIN slaves' + (s.slaves.length ? ' (' + s.slaves.length + ')' : ''));
-            const sl = s.slaves.slice(0, 7).map((x) => ['NAD ' + x.nad + (x.bus === 2 ? ' (bus 2)' : ''), (x.location || '') + (x.lastNrc != null ? '  NRC ' + x.lastNrc : x.lastOk ? '  ok' : '')]);
-            if (!sl.length) sl.push(['-', s.kind === 'bdc-uds' ? 'read 22 DA 5F failed or no link' : 'none']);
-            G.table(cv, t, 816, 330, 750, [{ w: 150, title: '' }, { w: 600, title: '' }], sl, { rowH: 23, size: 15 });
-            if (s.slaves.length > 7) cv.text('+ ' + (s.slaves.length - 7) + ' more', 1400, 500, 15, t.dim);
-            if (cv.own) G.button(cv, t, 36, 456, 0, 44, probing ? 'Probing...' : 'Probe again', async () => { if (probing) return; probing = true; await ctl.probe(); probing = false; say('Probe done: ' + ctl.state); }, { key: 'probe', busy: probing });
+            G.table(cv, t, 36, 100, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 30, size: 17 });
+            G.panel(cv, t, 800, 60, 780, 452, 'Modules' + (s.slaves.length ? ' (' + s.slaves.length + ')' : ''));
+            const sl = s.slaves.slice(0, 16).map((x) => { const tg = s.scene[x.bus + ':' + x.nad]; return [x.bus + ':' + x.nad, (x.location || '').slice(0, 40), tg ? C.rgbToHex(tg) + ' ' + tg.brightness + '%' : (x.driven ? 'releasing' : 'OEM') + (x.failures ? ' NRC' : '')]; });
+            if (!sl.length) sl.push(['-', s.kind === 'bdc-uds' ? 'read 22 DA 5F / E3 D1 failed or no link' : 'none', '']);
+            G.table(cv, t, 816, 100, 750, [{ w: 60, title: '' }, { w: 440, title: '' }, { w: 250, title: '' }], sl, { rowH: 22, size: 14 });
+            if (s.slaves.length > 16) cv.text('+ ' + (s.slaves.length - 16) + ' more', 1400, 472, 14, t.dim);
+            let bx = 36;
+            bx += G.button(cv, t, bx, 460, 0, 44, probing ? 'Probing...' : 'Probe again', async () => { if (probing) return; probing = true; await ctl.probe(); probing = false; say('Probe done: ' + ctl.state); }, { key: 'probe', busy: probing }) + 10;
+            bx += G.button(cv, t, bx, 460, 0, 44, 'Restore OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program }) + 10;
+            linkPill(cv, t, bx, 466); statePill(cv, t, bx + 180, 466, 240);
         }
 
+        /* ---------- the frame ---------- */
         ctx.loop('MAIN', 10, () => {
             const t = ctx.theme();
-            if (ctl.mode === 'rainbow' && ctl.driven) { const d = C.rgbToHsv(ctl.driven); hsv = { h: d.h, s: hsv.s, v: hsv.v }; }
             const cv = ctx.canvas(1600, 520).clear(t.bg);
+            geometry = {};
             const badges = [];
             if (ctl.kind === 'mock') badges.push({ text: 'SIM' });
-            if (ctl.custom) badges.push({ text: ctl.kind === 'bdc-uds' && !ctl.armed ? 'DRY RUN' : ctl.mode === 'rainbow' ? 'RAINBOW' : 'CUSTOM' });
+            if (ctl.kind === 'bdc-uds' && !ctl.armed) badges.push({ text: 'DRY RUN' });
+            if (ctl.program) badges.push({ text: (S.MODE_LABELS[ctl.program.mode] || 'CUSTOM').toUpperCase() });
+            if (editor.editing) badges.push({ text: 'EDITING' });
             G.frame(cv, t, PAGES, page, badges);
-            if (page === 0) drawColour(cv, t); else if (page === 1) drawFavourites(cv, t); else drawDiagnostics(cv, t);
+            try { [drawColours, drawDual, drawModes, drawFavourites, drawDiagnostics][page](cv, t); } catch (e) { log.error('draw page ' + page, e); }
             if (flash && Date.now() < flash.until) {
                 const w = Math.min(1500, cv.textWidth(flash.text, 20, { font: 'bold' }) + 60);
-                cv.roundRect(800 - w / 2, 470, w, 40, 20, withAlpha('#000000', 0.75));
+                cv.roundRect(800 - w / 2, 470, w, 40, 20, withAlpha('#000000', 0.78));
                 cv.text(flash.text, 800, 497, 20, '#ffffff', { align: 'center', font: 'bold' });
             } else flash = null;
             return ctx.ui.image('MAIN_GFX', cv);
