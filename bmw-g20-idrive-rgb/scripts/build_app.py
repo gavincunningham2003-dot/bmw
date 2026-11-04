@@ -39,6 +39,10 @@ def main():
         with open(os.path.join(sdk, "package.json"), "w", encoding="utf-8") as f:
             json.dump({"name": "oap-sdk", "version": "0.0.0-placeholder", "main": "index.js"}, f)
         print("WARNING: no oap-sdk in the kit: building with a placeholder (not installable)")
+    # the kit's build copies kit/runtime into the package: apply this app's one runtime change there first (scripts/kit_patch.js)
+    r = subprocess.run(["node", os.path.join(ROOT, "scripts", "kit_patch.js"), os.path.join(KIT, "kit", "runtime", "display.js")])
+    if r.returncode:
+        sys.exit("kit patch failed")
     r = subprocess.run([sys.executable, os.path.join("kit", "tools", "build.py"), spec["id"]], cwd=KIT)
     if r.returncode:
         sys.exit("build failed")

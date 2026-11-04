@@ -43,6 +43,7 @@ function stage() {
         else if (f === 'app.json') fs.copyFileSync(s, path.join(STAGE, 'app.json'));
     }
     copyDir(RUNTIME, path.join(js, 'kit'));
+    require('./kit_patch').patchRuntime(path.join(js, 'kit', 'display.js'));     // the knob to the app while it grabs
     const spec = JSON.parse(fs.readFileSync(path.join(APP, 'app.json'), 'utf8'));
     // what kit/tools/build.py writes next to the runtime (the parts mgu.js and hu-stub.js read)
     const rt = { id: spec.id, title: spec.title, version: spec.version, screens: spec.screens, settings: spec.settings, startWidget: spec.startWidget || null, stateIds: {} };
