@@ -11,7 +11,9 @@ through seven colours by eye, and the modules return to the OEM colour by themse
 §0.1). The app itself has not been installed on the head unit yet; every write path in it is gated and
 dry-run by default.
 
-![The Colour page](docs/screens/03-colour-custom-on.png)
+![Dual Colour](docs/screens/06-dual-applied.png)
+
+![Colours](docs/screens/04-colours-applied.png)
 
 ## The one-line finding
 
@@ -20,16 +22,16 @@ BDC-03 generation the G20 belongs to) lists a **per-module RGB actuator**: UDS `
 LIN slave address, on/off, brightness, **red, green, blue** and an **activation time of 0..254 s**. The
 MGU can send UDS to any control unit through its own diagnostic gateway service (`InternalTasu`), which
 the MGU App Kit already uses from inside apps. So "turn the wheel, the lights change, no laptop, no
-recoding" has a documented, non-persistent, self-reverting path. It is **documented, not yet verified
-on a car**: see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
+recoding" has a documented, non-persistent, self-reverting path, **verified on the car** on 2026-11-04:
+see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
 
 ## What is in here
 
 | Path | What |
 |---|---|
-| `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `app.json` + `main.js` (UI: wheel, slider, favourites, rainbow, diagnostics), `colour.js`, `favourites.js`, `lighting_controller.js` (the interface + state machine: fades, rainbow, zones, keep-alive), `lighting_mock.js` (simulated BDC with the car's 19-module layout), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_someip.js` (probe only), `lighting_protocol.js` (the bytes, verified) |
+| `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `main.js` (five pages: Colours, Dual, Modes, Favourites, Diagnostics), `ui_widgets.js` (colour wheel, circular brightness dial, the rotary editor), `lighting_scene.js` (per-module scene, groups, zones, modes, presets), `lighting_scheduler.js` (the write queue), `lighting_controller.js` (apply / keep-alive / restore), `lighting_mock.js` (simulated BDC, 19 modules, fault injection), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_protocol.js` (the bytes, verified), `colour.js`, `favourites.js` |
 | `tools/laptop/` | `enetdiag`: the read-only Windows ENET discovery utility (UDS 0x22 only), `write_test.py` (the gated one-frame-per-step write test, with a colour cycle and fades), `catalog_search.py` for the MGU's SOME/IP catalog |
-| `tests/` | 77 Node tests (colour, protocol, controller, transitions, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
+| `tests/` | 87 Node tests (colour, protocol, scene, scheduler with a throughput benchmark, controller, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
 | `scripts/` | `stage.js` (lay the app out with the kit runtime for tests), `preview_frames.js` (PNG screenshots), `build_app.py` (the kit's real build) |
 | `docs/screens/` | screenshots rendered by the kit's own drawing code |
 | `RESEARCH.md` | every repository investigated, with commit SHAs, useful files and verdicts |
@@ -43,17 +45,33 @@ on a car**: see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md]
 npm test                       # stages the app with the kit runtime and runs the Node tests
 npm run test:py                # the Python tests (loopback simulated car included)
 npm run preview                # renders the pages to preview/*.png
-python scripts/build_app.py    # the kit's build -> dist/ambient_rgb@0.1.0.mgu (needs the real oap-sdk to be installable)
+python scripts/build_app.py    # the kit's build -> dist/ambient_rgb@0.3.0.mgu (needs the real oap-sdk to be installable)
 cd tools/laptop && python -m enetdiag selftest
 ```
 
 The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `IDRIVE7_APPS`).
+
+## What the app does (0.3.0)
+
+- **Preview, then apply.** Turning the knob or tapping the wheel changes only the screen; the car changes on
+  Apply, or on the confirming press if you keep that setting on. Cancel and BACK discard.
+- **Colours:** a colour wheel, a circular brightness dial, saturation, a zone picker (all, dashboard, front
+  doors, rear doors, footwells, upper, lower), the BDC's library colours, saved colours.
+- **Dual Colour:** upper and lower lighting with their own colour and brightness, swap, copy, save, Apply both.
+  The door-handle lights belong to whichever group you choose.
+- **Modes:** Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave, each with its settings; complete
+  configurations saved as presets.
+- **Rotary first:** every control is reachable and adjustable with the iDrive knob; touch works where the
+  renderer routes it; - / + buttons remain for a unit without the controller gate.
+- **Honest restore:** Restore OEM releases every driven module and reports exactly what was accepted.
 
 ## Safety, in short
 
 - The app ships with **Lighting link = Simulated BDC** and **Write to the car = Disarmed**. Armed, it
   sends only `2E DA5E` / `2E E3D1` to the BDC body (0x40) and `10 03` when asked for a session; the
   allow list is enforced in code (`lighting_protocol.js checkRequest`) and covered by tests.
+- Lighting changes are blocked unless the car is known to be parked (fail closed when the speed is unknown).
+- One diagnostic write at a time; animation frames are paced to the measured transport and never queue up.
 - Every write carries a timeout (ZEIT, 10 s by default, 30 s cap): if the app dies, the BDC returns to
   OEM lighting by itself. Restore OEM writes the modules inactive and stops.
 - Nothing is coded, flashed or persisted in the car. The laptop tool only reads.

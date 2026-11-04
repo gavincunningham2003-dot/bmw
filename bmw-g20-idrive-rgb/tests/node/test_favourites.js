@@ -33,6 +33,18 @@ test('at most MAX, oldest dropped; a damaged file is ignored', () => {
     fs.writeFileSync(path.join(d, 'favourites.json'), '{not json');
     assert.strictEqual(new Favourites(d).list().length, 0);
 });
+test('complete configurations: add, replace by name, remove, persist', () => {
+    const d = dir();
+    const f = new Favourites(d);
+    const p = f.addPreset('Evening', { mode: 'dual', top: { colour: { r: 1, g: 2, b: 3 }, brightness: 70 } });
+    assert.strictEqual(p.program.bottom.brightness, 45, 'defaults filled');
+    f.addPreset('Evening', { mode: 'wave' });
+    assert.strictEqual(f.presets().length, 1, 'replaced by name');
+    assert.strictEqual(f.presets()[0].program.mode, 'wave');
+    assert.strictEqual(new Favourites(d).presets()[0].name, 'Evening');
+    assert.strictEqual(f.removePreset('Evening'), true);
+    assert.strictEqual(f.removePreset('Evening'), false);
+});
 test('no data dir: works in memory', () => {
     const f = new Favourites(null);
     assert.strictEqual(f.add('#123456'), true);

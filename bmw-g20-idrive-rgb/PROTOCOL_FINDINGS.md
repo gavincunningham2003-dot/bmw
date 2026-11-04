@@ -55,6 +55,8 @@ Established by this:
 - **The dashboard line is three modules** (bus 2 NAD 1 centre, 2 passenger, 3 driver): a write to NAD 1 alone changed only the centre segment; writes to all three (`2E E3 D1 0n 01 64 FE 00 00 05`, accepted in 0 ms each) changed the whole strip. The same split applies to every door (contour line, door opener, map pocket): the app writes all 19 modules per round.
 - **BDC fault memory after 16 writes: empty** (`59 02 4F`, same as the baseline). The actuator leaves no stored fault.
 - Not yet tried: brightness other than 100, NAD 0, a `22 DA 5F` after ZEIT to see the timeout return in the data (seen by eye only).
+- **NAD 0 is not assumed to be a broadcast.** The LIN broadcast NAD is `0x7F`; the actuator's `NAD 0..31` range only bounds the argument. The app addresses every module individually.
+- **One write in flight.** The positive reply `6E DA 5E` carries no NAD, so two writes to the same identifier could not be matched to their replies, and the head unit's TASU gateway (kit/diag.js) refuses a second concurrent request. The app's scheduler sends one write at a time; the 14 ms per write was measured over ENET, the TASU figure is still to be measured on the head unit.
 
 ## 1. Transport: MGU diagnostic gateway (TASU)
 

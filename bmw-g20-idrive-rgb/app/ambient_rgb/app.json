@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: a full colour wheel for the factory ambient lighting, with fades, a rainbow mode and zones. Any colour, live, through the body controller's own light actuator (verified on a G20); OEM control restored at a press or by itself.",
-  "version": "0.2.0",
+  "description": "BMW Ambient RGB Controller: colour wheel and circular brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing and Colour Wave modes, saved configurations. Preview on screen, apply on confirmation; the body controller's own light actuator (verified on a G20); OEM restored at a press or by itself.",
+  "version": "0.3.0",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -32,8 +32,8 @@
       "title": "Ambient RGB",
       "buttons": [
         [
-          "BTN_CUSTOM",
-          "Custom on/off"
+          "BTN_APPLY",
+          "Apply"
         ],
         [
           "BTN_OEM",
@@ -103,185 +103,100 @@
       ]
     },
     {
-      "key": "brightness",
-      "label": "Custom brightness",
-      "type": "number",
-      "unit": "%",
-      "default": 100,
-      "steps": [
-        25,
-        50,
-        75,
-        100
-      ]
-    },
-    {
-      "key": "fade",
-      "label": "Fade between colours",
-      "type": "number",
-      "unit": "ms",
-      "default": 600,
-      "steps": [
-        0,
-        300,
-        600,
-        1000,
-        2000,
-        4000
-      ]
-    },
-    {
-      "key": "rainbow",
-      "label": "Rainbow: seconds per turn",
-      "type": "number",
-      "unit": "s",
-      "default": 20,
-      "steps": [
-        5,
-        10,
-        20,
-        40,
-        90
-      ]
-    },
-    {
-      "key": "zone",
-      "label": "Modules to drive",
+      "key": "confirmApplies",
+      "label": "Press to confirm applies",
       "type": "choice",
-      "default": "all",
+      "default": "on",
       "options": [
         [
-          "all",
-          "All modules"
-        ],
-        [
-          "dash",
-          "Dashboard lines"
-        ],
-        [
-          "doors",
-          "Doors"
-        ],
-        [
-          "footwells",
-          "Footwells"
-        ],
-        [
-          "front",
-          "Front"
-        ],
-        [
-          "rear",
-          "Rear"
-        ]
-      ]
-    },
-    {
-      "key": "knob",
-      "label": "iDrive knob turns",
-      "type": "choice",
-      "default": "hue",
-      "options": [
-        [
-          "hue",
-          "Hue"
-        ],
-        [
-          "sat",
-          "Saturation"
-        ],
-        [
-          "val",
-          "Value"
+          "on",
+          "Yes: confirming a wheel or dial applies it"
         ],
         [
           "off",
-          "Nothing (HMI keeps it)"
+          "No: only the Apply button applies"
         ]
       ]
     },
     {
-      "key": "hue",
-      "label": "Hue (no-touch fallback)",
+      "key": "handles",
+      "label": "Door handle lights belong to",
+      "type": "choice",
+      "default": "bottom",
+      "options": [
+        [
+          "bottom",
+          "Lower lighting"
+        ],
+        [
+          "top",
+          "Upper lighting"
+        ],
+        [
+          "off",
+          "Neither (left OEM)"
+        ]
+      ]
+    },
+    {
+      "key": "parked",
+      "label": "Lighting changes while driving",
+      "type": "choice",
+      "default": "strict",
+      "options": [
+        [
+          "strict",
+          "Blocked unless parked (fail closed)"
+        ],
+        [
+          "lenient",
+          "Allowed (not recommended)"
+        ]
+      ]
+    },
+    {
+      "key": "frame",
+      "label": "Animation frame time",
       "type": "number",
-      "unit": "deg",
-      "default": 210,
+      "unit": "ms",
+      "default": 80,
       "steps": [
-        0,
-        10,
-        20,
-        30,
-        40,
         50,
-        60,
-        70,
         80,
-        90,
-        100,
-        110,
         120,
-        130,
-        140,
-        150,
-        160,
-        170,
-        180,
-        190,
         200,
-        210,
-        220,
-        230,
-        240,
-        250,
-        260,
-        270,
-        280,
-        290,
-        300,
-        310,
-        320,
-        330,
-        340,
-        350
+        400
       ]
     },
     {
-      "key": "sat",
-      "label": "Saturation (no-touch fallback)",
+      "key": "inflight",
+      "label": "Writes in flight (experimental)",
+      "type": "choice",
+      "default": "1",
+      "options": [
+        [
+          "1",
+          "1 (TASU takes one at a time)"
+        ],
+        [
+          "2",
+          "2 (one per LIN bus)"
+        ]
+      ]
+    },
+    {
+      "key": "simLatency",
+      "label": "Simulated link latency",
       "type": "number",
-      "unit": "%",
-      "default": 100,
+      "unit": "ms",
+      "default": 0,
       "steps": [
         0,
-        10,
-        20,
+        5,
+        14,
         30,
-        40,
-        50,
         60,
-        70,
-        80,
-        90,
-        100
-      ]
-    },
-    {
-      "key": "val",
-      "label": "Value (no-touch fallback)",
-      "type": "number",
-      "unit": "%",
-      "default": 100,
-      "steps": [
-        10,
-        20,
-        30,
-        40,
-        50,
-        60,
-        70,
-        80,
-        90,
-        100
+        120
       ]
     },
     {

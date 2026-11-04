@@ -1,48 +1,36 @@
 'use strict';
 /**
- * controller.js - LightingController: what the UI talks to. One interface, three implementations:
+ * lighting_controller.js - LightingController: what the UI talks to. One interface, three implementations:
  *
- *   mock.js      MockLightingController    a simulated BDC with LIN slaves; the whole app runs on it
- *   bdc_uds.js   BdcUdsLightingController  the real thing over the head unit's TASU diagnostic link
- *   someip.js    SomeIpLightingController  a probe for a native SOME/IP lighting service (none known yet)
+ *   lighting_mock.js      MockLightingController    a simulated BDC with the car's 19 modules; the whole app runs on it
+ *   lighting_bdc_uds.js   BdcUdsLightingController  the real thing over the head unit's TASU diagnostic link
+ *   lighting_someip.js    SomeIpLightingController  a probe for a native SOME/IP lighting service (none known yet)
  *
- * What the car established (PROTOCOL_FINDINGS.md 0.1): the BDC's layering actuator (2E DA5E bus 1, 2E E3D1 bus 2)
- * drives one module with R, G, B at a brightness for ZEIT seconds, answers in ~14 ms, overrides the OEM lighting
- * on or off, hands the module back at once on ZUSTAND 0, and by itself when ZEIT lapses.
+ * The controller knows only APPLIED state. Previews live in the UI: nothing here is called while the user browses,
+ * and nothing reaches a module until apply(program) is called with a confirmed configuration.
  *
- * The base class owns the state machine and the "custom control" loop:
- *   - custom control = rounds: every selected module gets the colour to show now, one write each, in order;
- *   - a colour change with a fade time is a transition: the rounds run back to back and each one writes the
- *     colour interpolated between where the lights were and the target (RGB, linear); rainbow mode is a
- *     transition that never ends (the hue turns at a set rate);
- *   - between rounds the loop sleeps until a keep-alive is due: ZEIT * keepAliveFactor minus the time the last
- *     round took, so a slow transport can never let a module fall back to OEM mid-session;
- *   - zones: modules outside the chosen zone are released once (ZUSTAND 0) and left to the OEM function;
- *   - disableCustom() / restoreOem() write every driven module inactive and stop; the BDC also falls back by
- *     itself once ZEIT lapses, which keeps the whole scheme reversible after a crash or a head-unit restart;
- *   - after maxRejects refusals in a row, or a lost link, custom control switches itself off (event 'failure').
+ *   program  = lighting_scene.js: { mode: 'solid' | 'dual' | 'zones' | 'rainbow' | 'fade' | 'breathing' | 'wave', ... }
+ *   apply(program)     render the program to per-module targets, write them (scheduler, 'apply' priority), release the
+ *                      modules it no longer covers, start the animation ticker for animated modes; resolves with what
+ *                      was written and what failed
+ *   restoreOem()       stop the ticker, drop queued frames, release every module this controller drove (ZUSTAND 0,
+ *                      verified instant), wait for the transport, report exactly which releases were accepted
+ *   keep-alive         static programs: a module is rewritten only when its last accepted write is older than
+ *                      ZEIT * keepAliveFactor; animated programs: frames carry the refresh, and modules whose target
+ *                      has not changed are forced in before they could lapse
  *
- * Subclasses implement:
- *   _probe()                           -> capabilities (see probe())
- *   _readSlaves()                      -> [{ bus, nad, location, locationId, ... }]
- *   _writeSlave(slave, params)         -> { ok, nrc?, reason?, bytes? }   params = { active, r, g, b, brightness, seconds }
- *   _available()                       -> bool (transport up)
- * Timers and the clock are injectable (opts.setTimeout / clearTimeout / now) so tests run in fake time.
+ * What the car established (PROTOCOL_FINDINGS.md 0.1): 2E DA5E / E3D1 drive one module for ZEIT seconds (~14 ms a
+ * write over ENET), override the OEM lighting, hand back at once on ZUSTAND 0 and by themselves when ZEIT lapses.
+ * The head unit's TASU path takes one request at a time (kit/diag.js), so the scheduler sends one write at a time.
+ *
+ * Operations are serialised (apply / restoreOem never interleave) and the timers / clock are injectable for tests.
+ * Subclasses implement _probe(), _readSlaves(), _writeSlave(slave, params) and _available(), as before.
  */
 const EventEmitter = require('events');
+const S = require('./lighting_scene');
+const { WriteScheduler } = require('./lighting_scheduler');
 
 const STATES = Object.freeze(['disconnected', 'connecting', 'connected', 'error']);
-const MODES = Object.freeze(['static', 'rainbow']);
-
-const clampByte = (n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0)));
-const lerp = (a, b, t) => a + (b - a) * t;
-function hsvToRgb(h, s, v) {
-    h = ((h % 360) + 360) % 360;
-    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
-    let r = 0, g = 0, b = 0;
-    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
-    return { r: clampByte((r + m) * 255), g: clampByte((g + m) * 255), b: clampByte((b + m) * 255) };
-}
 
 class LightingController extends EventEmitter {
     constructor(opts) {
@@ -51,36 +39,40 @@ class LightingController extends EventEmitter {
         this.log = o.log || { info() {}, warn() {}, error() {} };
         this.kind = o.kind || 'base';
         this.refreshSeconds = Math.max(2, Math.min(254, o.refreshSeconds || 10));   // ZEIT sent with every write
-        this.keepAliveFactor = o.keepAliveFactor || 0.5;                           // a keep-alive round is due at ZEIT * factor
-        this.minGapMs = o.minGapMs == null ? 60 : o.minGapMs;                       // between two rounds of a transition
+        this.keepAliveFactor = o.keepAliveFactor || 0.5;                           // refresh a module once its write is this old
+        this.frameMs = o.frameMs || 80;                                           // animation tick target; adapts to the measured round
+        this.maxSlaveFailures = o.maxSlaveFailures || 3;
         this.maxRejects = o.maxRejects || 5;
-        this.maxSlaveFailures = o.maxSlaveFailures || 3;                           // a module that refuses this often is skipped
-        this.defaultBrightness = o.brightness == null ? 100 : o.brightness;        // "elektrische Helligkeit": 100 is what the OEM function uses
-        this.fadeMs = o.fadeMs == null ? 600 : o.fadeMs;                            // default transition time for setColour
-        this.rainbowPeriodS = o.rainbowPeriodS || 20;                              // seconds per full hue turn in rainbow mode
+        this.parkedPolicy = o.parkedPolicy || 'strict';                           // 'strict': no apply unless parked() === true
+        this.parked = o.parked || null;                                          // fn() -> true | false | null (unknown)
         this._setTimeout = o.setTimeout || setTimeout;
         this._clearTimeout = o.clearTimeout || clearTimeout;
         this._now = o.now || Date.now;
+        this.scheduler = new WriteScheduler({
+            writer: (slave, params) => this._writeSlave(slave, params), maxInFlight: o.maxInFlight || 1, minGapMs: o.minGapMs || 0,
+            busyBackoffMs: o.busyBackoffMs, maxBusyRetries: o.maxBusyRetries, log: this.log,
+            now: this._now, setTimeout: this._setTimeout, clearTimeout: this._clearTimeout,
+        });
+        this.scheduler.on('failed', (key, params, r) => this._onFailed(key, params, r));
+        this.scheduler.on('written', (key) => { this.driven.add(key); this.failures.delete(key); });
 
         this.state = 'disconnected';
-        this.custom = false;
-        this.mode = 'static';
-        this.colour = { r: 255, g: 255, b: 255 };     // the target (what the user picked)
-        this.driven = null;                            // what the lights were last told to show (null: nothing yet)
-        this.brightness = this.defaultBrightness;
-        this.zone = 'all';
-        this.zoneFilter = null;                        // fn(slave) -> bool, or null for all
+        this.program = null;               // the applied program (normalised), null = OEM
+        this.scene = {};                   // the last rendered targets
+        this.phase0 = 0;                   // animation time origin
         this.capabilities = null;
         this.slaves = [];
+        this.byKey = new Map();
+        this.driven = new Set();           // modules this controller has driven since the last restore
+        this.failures = new Map();         // key -> count of refusals in a row
         this.lastError = null;
-        this.stats = { writes: 0, accepted: 0, rejected: 0, timeouts: 0, rounds: 0, rejectsInARow: 0, lastWriteAt: null, lastRoundMs: null, avgRoundMs: null };
-        this.history = [];                 // last 30 exchanges for the diagnostics page
-        this._timer = null;
-        this._busy = false;
+        this.stats = { applies: 0, restores: 0, frames: 0, framesDropped: 0, keepAlives: 0, lastApplyMs: null, lastRestore: null, rejectsInARow: 0 };
+        this.history = [];
+        this._ticker = null;
+        this._keepTimer = null;
         this._gen = 0;
-        this._fade = null;                 // { from, to, start, ms } while a transition runs
-        this._hue = 0;                     // rainbow phase
-        this._released = new Set();        // modules written inactive because of the zone
+        this._op = Promise.resolve();
+        this._fpsWindow = [];
     }
 
     /* ---------- state ---------- */
@@ -92,17 +84,15 @@ class LightingController extends EventEmitter {
         this.log.info('lighting: ' + s + (err ? ' (' + err + ')' : ''));
         this.emit('state', s, err);
     }
-    _record(entry) {
-        this.history.push(Object.assign({ t: this._now() }, entry));
-        if (this.history.length > 30) this.history.shift();
-    }
+    get connected() { return this.state === 'connected'; }
+    get custom() { return !!this.program; }
 
-    /** Bring the transport up and probe the BDC. Resolves with the capabilities; never throws. */
     async connect() {
         this._setState('connecting');
         try {
             this.capabilities = await this._probe();
-            this.slaves = ((this.capabilities && this.capabilities.slaves) || []).map((s) => Object.assign({ failures: 0 }, s));
+            this.slaves = ((this.capabilities && this.capabilities.slaves) || []).map((s) => Object.assign({}, s));
+            this.byKey = new Map(this.slaves.map((s) => [S.key(s), s]));
             if (!this.capabilities || !this.capabilities.available) { this._setState('disconnected', (this.capabilities && this.capabilities.reason) || 'transport unavailable'); return this.capabilities; }
             this._setState('connected', null);
         } catch (e) {
@@ -111,221 +101,179 @@ class LightingController extends EventEmitter {
         }
         return this.capabilities;
     }
-
-    /** Probe again (after the link came back, or from the diagnostics page). */
     async probe() { return this.connect(); }
-
-    /** What the lights do right now, as far as the controller knows (and the BDC says, where it can be read). */
     async readState() {
-        try { const slaves = await this._readSlaves(); if (slaves) this.slaves = slaves.map((s) => Object.assign({ failures: 0 }, this.slaves.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s)); } catch (e) { this.log.warn('readSlaves: ' + e); }
-        return { state: this.state, custom: this.custom, mode: this.mode, colour: Object.assign({}, this.colour), driven: this.driven && Object.assign({}, this.driven), brightness: this.brightness, zone: this.zone, slaves: this.slaves.slice(), capabilities: this.capabilities, lastError: this.lastError };
+        try { const slaves = await this._readSlaves(); if (slaves) { this.slaves = slaves.map((s) => Object.assign({}, this.byKey.get(S.key(s)) || {}, s)); this.byKey = new Map(this.slaves.map((s) => [S.key(s), s])); } } catch (e) { this.log.warn('readSlaves: ' + e); }
+        return { state: this.state, custom: this.custom, program: this.program, scene: Object.assign({}, this.scene), slaves: this.slaves.slice(), capabilities: this.capabilities, lastError: this.lastError };
     }
-
-    get connected() { return this.state === 'connected'; }
-
-    /** The modules a round writes: the zone's. */
-    selected() { return this.zoneFilter ? this.slaves.filter(this.zoneFilter) : this.slaves; }
 
     /** Is a write even worth trying? Subclasses add their own gates (not armed, unknown variant). */
     canControl() {
         if (!this.connected) return { ok: false, reason: this.lastError || 'not connected' };
-        if (!this.slaves.length) return { ok: false, reason: 'no RGB LIN slaves known (read DA5F / E3D1 first)' };
+        if (!this.slaves.length) return { ok: false, reason: 'no RGB LIN modules known (read DA5F / E3D1 first)' };
         const rgb = this.capabilities && this.capabilities.rgbActuator;
         if (rgb === 'none' || rgb === 'unsupported') return { ok: false, reason: 'this body controller has no RGB layering actuator' };
+        if (this.parkedPolicy === 'strict' && this.kind !== 'mock') {
+            const p = this.parked ? this.parked() : null;
+            if (p !== true) return { ok: false, reason: p === false ? 'the car is moving: park to change the lighting' : 'parking state unknown: lighting changes are blocked (fail closed)' };
+        }
         return { ok: true };
     }
 
-    /* ---------- what to show ---------- */
+    /* ---------- apply / restore ---------- */
+    _serial(fn) { const p = this._op.then(fn, fn); this._op = p.catch(() => {}); return p; }
+
     /**
-     * Set the colour. opts.fadeMs (default this.fadeMs): the lights glide there over that time when custom control is
-     * on; 0 jumps. Without custom control it is only remembered (the UI preview shows it) until enableCustom().
+     * Apply a confirmed program. Resolves { ok, reason?, written, failed, released } once the transport has taken
+     * every write of the first round (or refused it). Static programs then only get keep-alives; animated ones tick.
      */
-    setColour(c, opts) {
-        const o = opts || {};
-        this.colour = { r: clampByte(c.r), g: clampByte(c.g), b: clampByte(c.b) };
-        if (o.brightness != null) this.brightness = Math.max(0, Math.min(100, o.brightness | 0));
-        this.emit('colour', this.colour);
-        if (this.mode === 'rainbow' && !o.leaveMode) this.mode = 'static';
-        if (this.custom) {
-            const fadeMs = o.fadeMs == null ? this.fadeMs : o.fadeMs;
-            const from = this.driven || this.colour;
-            this._fade = fadeMs > 0 && !this._same(from, this.colour) ? { from: Object.assign({}, from), to: Object.assign({}, this.colour), start: this._now(), ms: fadeMs } : null;
-            this._kick();
-        }
-        return this.colour;
-    }
-    /** 'static' or 'rainbow' (the hue turns once per rainbowPeriodS, at the current brightness and full saturation). */
-    setMode(mode, opts) {
-        if (MODES.indexOf(mode) < 0) throw new Error('bad mode ' + mode);
-        this.mode = mode;
-        if (opts && opts.periodS) this.rainbowPeriodS = Math.max(2, opts.periodS);
-        this._fade = null;
-        this.emit('mode', mode);
-        if (this.custom) this._kick();
-    }
-    /** Which modules to drive: 'all' or a name from lighting_protocol ZONES (a filter function is accepted too). */
-    setZone(zone, filter) {
-        this.zone = typeof zone === 'string' ? zone : 'custom';
-        this.zoneFilter = typeof zone === 'function' ? zone : (filter || null);
-        this.emit('zone', this.zone);
-        if (this.custom) this._kick();
-    }
-    _same(a, b) { return !!a && !!b && a.r === b.r && a.g === b.g && a.b === b.b; }
-
-    /** The colour this round should write (the transition's or the rainbow's current value). */
-    _current() {
-        const now = this._now();
-        if (this.mode === 'rainbow') {
-            const h = ((now / 1000) / this.rainbowPeriodS * 360) % 360;
-            this._hue = h;
-            return hsvToRgb(h, 1, 1);
-        }
-        if (this._fade) {
-            const t = Math.min(1, (now - this._fade.start) / this._fade.ms);
-            const f = this._fade;
-            const c = { r: clampByte(lerp(f.from.r, f.to.r, t)), g: clampByte(lerp(f.from.g, f.to.g, t)), b: clampByte(lerp(f.from.b, f.to.b, t)) };
-            if (t >= 1) this._fade = null;
-            return c;
-        }
-        return this.colour;
-    }
-    /** Something to write right now: a transition is running or the rainbow turns. */
-    _animating() { return this.mode === 'rainbow' || !!this._fade; }
-
-    /* ---------- on / off ---------- */
-    /** Start driving the lights with the current colour (keeps them driven until disableCustom / restoreOem). */
-    async enableCustom() {
-        const can = this.canControl();
-        if (!can.ok) { this.emit('refused', can.reason); return can; }
-        if (this.custom) return { ok: true };
-        this.custom = true;
-        this.stats.rejectsInARow = 0;
-        this._fade = null;
-        this.driven = null;
-        // nothing is driven yet: the modules outside the zone are OEM already, no release needed
-        this._released = new Set(this.slaves.filter((s) => this.selected().indexOf(s) < 0).map((s) => this._key(s)));
-        this.emit('custom', true);
-        await this._round();
-        return { ok: this.custom, reason: this.custom ? undefined : this.lastError };
+    apply(program) {
+        return this._serial(async () => {
+            const can = this.canControl();
+            if (!can.ok) { this.emit('refused', can.reason); return Object.assign({ ok: false, written: 0, failed: 0 }, can); }
+            const p = S.normalise(program);
+            const gen = ++this._gen;
+            const t0 = this._now();
+            this._stopTicker();
+            this.scheduler.clear('frame');
+            const wasAnimated = S.isAnimated(this.program);
+            this.program = p;
+            if (!wasAnimated || !S.isAnimated(p)) this.phase0 = this._now();
+            const scene = S.render(p, this.slaves, this._now(), { phase0: this.phase0 });
+            // modules driven before but not in this program: hand them back
+            const stale = Array.from(this.driven).filter((k) => !scene[k]).map((k) => this.byKey.get(k)).filter(Boolean);
+            if (stale.length) this.scheduler.release(stale);
+            const keys = Object.keys(scene);
+            keys.forEach((k) => this.scheduler.set(k, this.byKey.get(k), this._params(scene[k]), 'apply', true));
+            this.scene = scene;
+            this.stats.applies++;
+            this.emit('program', p);
+            await this.scheduler.drain();
+            if (gen !== this._gen) return { ok: false, reason: 'superseded', written: 0, failed: 0 };
+            stale.forEach((s) => { const k = S.key(s); const l = this.scheduler.last.get(k); if (l && l.ok && !l.params.active) this.driven.delete(k); });
+            let written = 0, failed = 0;
+            keys.forEach((k) => { const l = this.scheduler.last.get(k); if (l && l.ok && this._same(l.params, this._params(scene[k]))) written++; else failed++; });
+            this.stats.lastApplyMs = this._now() - t0;
+            if (!written && keys.length) { this._fail('the BDC accepted none of the writes'); return { ok: false, reason: this.lastError, written, failed, released: stale.length }; }
+            if (S.isAnimated(p)) this._startTicker(); else this._armKeepAlive();
+            this.log.info('applied ' + S.describe(p, this.slaves) + ': ' + written + ' written, ' + failed + ' failed, ' + this.stats.lastApplyMs + ' ms');
+            return { ok: true, written, failed, released: stale.length };
+        });
     }
 
-    /** Stop driving: every driven module is written inactive once (the BDC hands it back at once), then the loop stops. */
-    async disableCustom() {
-        if (!this.custom) return { ok: true };
-        this.custom = false;
-        this._gen++;
-        this._stopTimer();
-        this._fade = null;
-        this.emit('custom', false);
-        const res = await this._round({ active: false, seconds: 0 }, this.slaves.filter((s) => !this._released.has(this._key(s))));
-        this.driven = null;
-        this._released.clear();
-        return { ok: true, released: res };
+    /**
+     * Back to OEM: stop everything, release every driven module and wait for the transport. Resolves
+     * { ok, released, failed: [keys], pending } and never claims success for a module whose release was not accepted.
+     */
+    restoreOem() {
+        return this._serial(async () => {
+            this._gen++;
+            this._stopTicker();
+            this._stopKeepAlive();
+            this.scheduler.clear();
+            const had = !!this.program;
+            this.program = null;
+            this.scene = {};
+            this.emit('program', null);
+            const keys = Array.from(this.driven);
+            const slaves = keys.map((k) => this.byKey.get(k)).filter(Boolean);
+            if (slaves.length) {
+                if (!this._available()) { this.stats.restores++; return { ok: false, reason: 'transport unavailable: ' + slaves.length + ' module(s) not released (they lapse by themselves within ' + this.refreshSeconds + ' s)', released: 0, failed: keys, pending: keys.length }; }
+                this.scheduler.release(slaves);
+                await this.scheduler.drain();
+            }
+            const failed = [];
+            keys.forEach((k) => { const l = this.scheduler.last.get(k); if (l && l.ok && l.params && l.params.active === false) this.driven.delete(k); else failed.push(k); });
+            this.stats.restores++;
+            this.stats.lastRestore = this._now();
+            const ok = failed.length === 0;
+            if (!ok) this.log.warn('restore: ' + failed.length + ' module(s) not released: ' + failed.join(' '));
+            else if (had) this.log.info('restored OEM: ' + keys.length + ' module(s) released');
+            return { ok, released: keys.length - failed.length, failed, pending: 0, reason: ok ? undefined : failed.length + ' release(s) refused or unanswered (they lapse by themselves within ' + this.refreshSeconds + ' s)' };
+        });
     }
+    async shutdown() { try { await this.restoreOem(); } catch (e) { /* best effort */ } this._stopTicker(); this._stopKeepAlive(); }
 
-    /** Back to OEM: disable custom control. (There is no other state to restore: nothing persistent was touched.) */
-    async restoreOem() { return this.disableCustom(); }
-
-    /** On app exit / MainApp shutdown: let go of the lights, best effort. */
-    async shutdown() { try { await this.disableCustom(); } catch (e) { /* best effort */ } this._stopTimer(); }
-
-    /* ---------- the loop ---------- */
-    _key(s) { return s.bus + ':' + s.nad; }
-    _stopTimer() { if (this._timer) { this._clearTimeout(this._timer); this._timer = null; } }
-    _arm(ms) {
-        this._stopTimer();
+    /* ---------- the loops ---------- */
+    _params(t) { return { active: true, r: t.r, g: t.g, b: t.b, brightness: t.brightness, seconds: this.refreshSeconds }; }
+    _same(a, b) { return !!a && !!b && a.active === b.active && a.r === b.r && a.g === b.g && a.b === b.b && a.brightness === b.brightness; }
+    _staleKeys() {
+        const limit = this._now() - this.refreshSeconds * 1000 * this.keepAliveFactor;
+        return Object.keys(this.scene).filter((k) => { const l = this.scheduler.last.get(k); return !l || !l.ok || l.at <= limit; });
+    }
+    _stopKeepAlive() { if (this._keepTimer) { this._clearTimeout(this._keepTimer); this._keepTimer = null; } }
+    _armKeepAlive() {
+        this._stopKeepAlive();
         const gen = this._gen;
-        this._timer = this._setTimeout(() => { this._timer = null; if (gen === this._gen && this.custom) this._round(); }, ms);
+        const period = Math.max(250, this.refreshSeconds * 1000 * this.keepAliveFactor / 2);
+        this._keepTimer = this._setTimeout(() => {
+            this._keepTimer = null;
+            if (gen !== this._gen || !this.program || S.isAnimated(this.program)) return;
+            const stale = this._staleKeys();
+            if (stale.length) {
+                this.stats.keepAlives++;
+                stale.forEach((k) => this.scheduler.set(k, this.byKey.get(k), this._params(this.scene[k]), 'apply', true));
+            }
+            this._armKeepAlive();
+        }, period);
     }
-    /** A change arrived: run a round as soon as the gap allows (a running round picks it up at its end). */
-    _kick() {
-        if (this._busy) return;
-        const since = this.stats.lastWriteAt == null ? Infinity : this._now() - this.stats.lastWriteAt;
-        if (since >= this.minGapMs) this._round(); else this._arm(this.minGapMs - since);
+    _stopTicker() { if (this._ticker) { this._clearTimeout(this._ticker); this._ticker = null; } }
+    _startTicker() {
+        this._stopTicker();
+        const gen = this._gen;
+        const tick = () => {
+            this._ticker = null;
+            if (gen !== this._gen || !this.program || !S.isAnimated(this.program)) return;
+            if (!this._available()) { this._lost('transport lost'); return; }
+            const scene = S.render(this.program, this.slaves, this._now(), { phase0: this.phase0 });
+            const targets = Object.keys(scene).map((k) => ({ key: k, slave: this.byKey.get(k), params: this._params(scene[k]) }));
+            const r = this.scheduler.frame(targets, this._staleKeys());
+            this.scene = scene;
+            this.stats.frames++;
+            this.stats.framesDropped += r.dropped ? 1 : 0;
+            const now = this._now();
+            this._fpsWindow.push(now); while (this._fpsWindow.length && this._fpsWindow[0] < now - 3000) this._fpsWindow.shift();
+            // pace to what the transport can take: a frame per (modules x latency), never faster than frameMs
+            const lat = this.scheduler.stats.avgLatencyMs || 14;
+            const period = Math.max(this.frameMs, Math.round(lat * Math.max(1, targets.length) * 1.1));
+            this._ticker = this._setTimeout(tick, period);
+        };
+        tick();
     }
+    /** Frames per second the animation is achieving (last 3 s). */
+    fps() { return Math.round(this._fpsWindow.length / 3 * 10) / 10; }
 
-    /**
-     * One round: every selected module gets the current colour (or `over`, e.g. { active: false, seconds: 0 } to a
-     * given list). Modules the zone excludes are released once. Then the next round is scheduled: right after the gap
-     * while animating, else at the keep-alive.
-     */
-    async _round(over, list) {
-        if (this._busy) return { skipped: true };
-        this._busy = true;
-        const gen = this._gen, t0 = this._now();
-        const colour = over ? null : this._current();
-        const params = Object.assign({ active: true, r: colour ? colour.r : 0, g: colour ? colour.g : 0, b: colour ? colour.b : 0, brightness: this.brightness, seconds: this.refreshSeconds }, over || {});
-        const results = [];
-        let anyOk = false, lost = false;
-        const targets = list || (over ? this.slaves : this.selected());
-        // modules the zone no longer covers: hand them back once
-        if (!over) {
-            const sel = new Set(targets.map((s) => this._key(s)));
-            for (const s of this.slaves) {
-                if (sel.has(this._key(s)) || this._released.has(this._key(s))) continue;
-                if (!this._available()) { lost = true; break; }
-                try { await this._writeSlave(s, { active: false, r: 0, g: 0, b: 0, brightness: 0, seconds: 0 }); } catch (e) { /* best effort */ }
-                this._released.add(this._key(s));
-            }
-            targets.forEach((s) => this._released.delete(this._key(s)));
-        }
-        for (const s of targets) {
-            if (lost) break;
-            if (s.failures >= this.maxSlaveFailures && !over) { results.push({ nad: s.nad, bus: s.bus, skipped: true }); continue; }
-            if (!this._available()) { lost = true; break; }
-            let r;
-            try { r = await this._writeSlave(s, params); } catch (e) { r = { ok: false, reason: String(e && e.message || e) }; }
-            this.stats.writes++;
-            this.stats.lastWriteAt = this._now();
-            this._record({ bus: s.bus, nad: s.nad, ok: !!r.ok, nrc: r.nrc, reason: r.reason, bytes: r.bytes });
-            if (r.ok) { anyOk = true; this.stats.accepted++; s.failures = 0; s.lastOk = this._now(); s.lastNrc = null; } else {
-                if (r.reason === 'timeout' || r.reason === 'no reply') this.stats.timeouts++; else this.stats.rejected++;
-                s.failures = (s.failures || 0) + 1; s.lastNrc = r.nrc == null ? r.reason : r.nrc;
-            }
-            results.push(Object.assign({ nad: s.nad, bus: s.bus }, r));
-            if (gen !== this._gen && !over) break;    // disabled meanwhile
-        }
-        if (!over && anyOk) this.driven = colour;
-        this.stats.rounds++;
-        this.stats.lastRoundMs = this._now() - t0;
-        this.stats.avgRoundMs = this.stats.avgRoundMs == null ? this.stats.lastRoundMs : Math.round(this.stats.avgRoundMs * 0.8 + this.stats.lastRoundMs * 0.2);
-        this._busy = false;
-        this.emit('round', results, colour);
-        if (over) return results;
-        if (lost) { this._lost('transport lost'); return results; }
-        if (anyOk) this.stats.rejectsInARow = 0; else if (results.some((x) => !x.skipped)) this.stats.rejectsInARow++;
-        if (this.stats.rejectsInARow >= this.maxRejects) { this._fail('the BDC refused ' + this.stats.rejectsInARow + ' rounds in a row'); return results; }
-        if (this.custom && gen === this._gen) {
-            if (this._animating()) this._arm(this.minGapMs);
-            else this._arm(Math.max(250, this.refreshSeconds * 1000 * this.keepAliveFactor - this.stats.lastRoundMs));
-        }
-        return results;
+    _onFailed(key, params, r) {
+        const n = (this.failures.get(key) || 0) + 1;
+        this.failures.set(key, n);
+        this.history.push({ t: this._now(), key, nrc: r && r.nrc, reason: r && r.reason });
+        if (this.history.length > 30) this.history.shift();
+        if (r && r.reason === 'transport lost') { if (this.state === 'connected') this._lost('transport lost'); return; }
+        const allFailing = this.program && Object.keys(this.scene).length && Object.keys(this.scene).every((k) => (this.failures.get(k) || 0) >= this.maxSlaveFailures);
+        if (allFailing) this._fail('the BDC refuses every module');
     }
     _fail(why) {
-        this.custom = false; this._gen++; this._stopTimer(); this._fade = null;
+        this._gen++; this._stopTicker(); this._stopKeepAlive(); this.scheduler.clear();
+        this.program = null; this.scene = {};
         this.lastError = why;
-        this.emit('custom', false);
+        this.emit('program', null);
         this.emit('failure', why);
         this.log.warn('lighting: custom control off: ' + why);
     }
-    _lost(why) {
-        this._fail(why);
-        this._setState('disconnected', why);
-    }
-
-    /** The transport came back or went (subclasses call this from their availability callbacks). */
+    _lost(why) { this._fail(why); this.scheduler.pause(); this._setState('disconnected', why); }
     _availability(on) {
-        if (on && this.state !== 'connected' && this.state !== 'connecting') this.connect();
+        if (on && this.state !== 'connected' && this.state !== 'connecting') { this.scheduler.resume(); this.connect(); }
         else if (!on && this.state === 'connected') this._lost('transport lost');
     }
 
     /** Snapshot for the diagnostics page. */
     status() {
         return {
-            kind: this.kind, state: this.state, custom: this.custom, mode: this.mode, colour: Object.assign({}, this.colour), driven: this.driven && Object.assign({}, this.driven),
-            brightness: this.brightness, zone: this.zone, fading: !!this._fade, refreshSeconds: this.refreshSeconds, fadeMs: this.fadeMs, rainbowPeriodS: this.rainbowPeriodS,
-            slaves: this.slaves.map((s) => Object.assign({}, s)), selected: this.selected().length, capabilities: this.capabilities,
-            stats: Object.assign({}, this.stats), lastError: this.lastError, history: this.history.slice(-12),
+            kind: this.kind, state: this.state, custom: this.custom, program: this.program, description: this.program ? S.describe(this.program, this.slaves) : 'OEM',
+            animated: S.isAnimated(this.program), fps: this.fps(), refreshSeconds: this.refreshSeconds, frameMs: this.frameMs, parkedPolicy: this.parkedPolicy,
+            slaves: this.slaves.map((s) => Object.assign({}, s, { driven: this.driven.has(S.key(s)), failures: this.failures.get(S.key(s)) || 0 })),
+            driven: this.driven.size, scene: Object.assign({}, this.scene), capabilities: this.capabilities,
+            stats: Object.assign({}, this.stats), scheduler: this.scheduler.status(), lastError: this.lastError, history: this.history.slice(-12),
         };
     }
 
@@ -336,4 +284,4 @@ class LightingController extends EventEmitter {
     _available() { return false; }
 }
 
-module.exports = { LightingController, STATES, MODES, hsvToRgb };
+module.exports = { LightingController, STATES };

@@ -9,56 +9,43 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Node (77 tests, all passing)
+## Node (87 tests, all passing)
 
 | File | Covers |
 |---|---|
-| `test_colour.js` (10) | RGB↔HSV round trips, primaries, hex parsing, the FF→FE coding rule, the wheel's angle convention (hue 0 at 12 o'clock, clockwise: the kit's arc convention), `wheelPos` ↔ `wheelHit`, the RGBA wheel, the vector wheel rasterising, nudging, luma |
-| `test_protocol.js` (10) | the exact `2E DA5E` bytes and their order, bus 1/2 brightness caps, NAD range, every decoder (reply, SGBD index, LIN 1/2 status, PWM, FASTA, SVK), and the **allow list** (`checkRequest`): what may leave and what may not |
-| `test_controller.js` (23) | on the mock BDC with fake timers: probing, no writes before Apply, every slave written with ZEIT, **keep-alive before ZEIT lapses**, **fall-back to OEM after ZEIT without the app (reversibility)**, coalescing of bursts, Restore OEM, auto-off after N refusals, skipping a refusing slave, extended-session retry and S3 lapse, busy, **timeouts**, **offline BDC**, **link loss mid-session and reconnection**, **restart behaviour**, variant gates, status snapshot, shutdown, allow list on every byte |
-| `test_transitions.js` (8) | on the mock with the car's 19-module layout and fake timers: a jump (fade 0), a **fade** that glides monotonically and ends on target, a new target mid-fade starting from the live colour, **rainbow** turning at the set rate and stopping when a colour is picked, **zones** (only the zone written, the rest released once, back to all), the **keep-alive on a slow transport** (next round before any module can lapse), the status snapshot |
-| `test_bdc_uds.js` (12) | the real `kit/diag.js` on a faked TASU bus routed into the mock BDC with another app's DME frames mixed in: probe, **disarmed = dry runs only**, armed bytes, ZEIT cap, **unknown variant refused**, no slaves refused, `10 03` retry, transport away/back, loss mid-session, timeout, the gate against forged `14/2E coding/31/2F/10 02`, every byte of a session allowed |
-| `test_favourites.js` (4) | add/has/remove/persist/reload, MAX, damaged file, in-memory |
-| `test_ui.js` (10) | `main.js` through the harness: pages and targets, wheel and slider taps, Apply/Restore through on-page buttons and HMI bar buttons, live nudge while custom is on, favourites save/pick/delete, diagnostics page and probe, the iDrive knob (turn, press, grab follows page and setting), switching the link to the car without a transport, settings feeding the controller |
+| `test_colour.js` (10) | RGB↔HSV, hex, the FF→FE coding rule, the wheel's angle convention (0 at 12 o'clock, clockwise), `wheelPos` ↔ `wheelHit`, the vector wheel rasterising, nudging, luma |
+| `test_protocol.js` (10) | the exact `2E DA5E` bytes and order, 0xFF never in a colour byte, bus 1/2 caps, every decoder (the car's 10-byte records), the allow list |
+| `test_scene.js` (12) | module categories, groups and sides from the real locations; zones (upper/lower with the handle setting, front/rear doors, one module); solid, dual (handles top/bottom/off), zones (later wins), rainbow, fade (holds and glides), breathing (limits, smooth), wave (per-module phase, dashboard leads); normalise, describe, diff, presets round-trip |
+| `test_scheduler.js` (10) | one write at a time in order, newest target wins keeping its place, unchanged skipped unless forced, priorities release > apply > frame, **obsolete frames dropped whole**, busy backoff with a newer target winning, rejects reported, drain / clear / pause / resume, latency and writes-per-second stats, **the benchmark** (19 modules at 14 ms: 266 ms per frame sequential; 168 ms if one per bus could overlap), per-bus ordering with maxInFlight 2 |
+| `test_controller.js` (17) | on the simulated BDC with fake timers: probe; **nothing written before apply**; solid writes all 19 once then only keep-alives at the right times, never lapsing; dual on the right modules with the handle setting (and the release of the handles when set to off); zones keeping other zones; **restore releases every module and reports exactly** (a refused release is reported, a dead transport is reported); **apply / restore never interleave**, a second apply supersedes; **parking fail-closed** (unknown and moving both refused, nothing written); animated programs tick, pace to the transport, skip unchanged and force stale; breathing then a static apply stops the ticker; busy absorbed, lost link stops control and reconnects on availability without re-applying; every module refusing turns control off; status; every byte allowed and never 0xFF |
+| `test_bdc_uds.js` (12) | the real `kit/diag.js` on a faked TASU bus: probe reads; **disarmed = dry runs only**; armed bytes; ZEIT cap; unknown variant refused; no modules refused; `10 03` retry; transport away / back; lost mid-animation; timeout; the gate against forged services; every byte of a session allowed |
+| `test_favourites.js` (5) | colours and complete configurations (replace by name, persist, remove) |
+| `test_ui.js` (11) | `main.js` through the harness: every page draws; **preview only** (taps change the draft, zero writes, Apply writes); **the rotary flow** (enter the wheel, 10 clicks = 30°, press confirms and applies, enter the dial, turn, tilt left cancels back to the entered value with the car unchanged); the setting off (only Apply applies); Dual (taps, swap, copy, Apply both drives upper and lower differently, handle follows the lower group, save combination); Modes (Rainbow with its speed, Start, Breathing, Restore stops cleanly); zones from the Colours page keep other zones; Favourites (colours and configurations, apply, delete); Cancel discards; Diagnostics; switching the link to the car without a transport refuses Apply |
 
 ## Python (24 tests, all passing)
 
-| File | Covers |
-|---|---|
-| `test_hsfz.py` | HSFZ framing round trip, bad lengths, partial buffers, discovery reply parsing |
-| `test_uds.py` | request building, replies, multi-DID split, every decoder, the DID/location tables matching the app |
-| `test_policy_redact.py` | the read-only policy (0x22 only, functional only `22 F1 50`), VIN/serial/key/token redaction |
-| `test_scan_sim.py` | a full scan against the loopback simulated car (TCP + UDP): units, BDC identification, light reads (the car's 10-byte records, the two-bus layout), the `analysis` verdict, **the simulated car saw nothing but 0x22**, the written report is redacted (VIN/serial not even as hex), a legacy variant is "not ready", a "pending" reply is waited for and late frames are not misattributed, busy is retried, unreachable gateway reported not raised, the CLI self-test |
-| `test_catalog_search.py` | the SOME/IP catalog search on a synthetic catalog, writable-field detection, the CLI extract |
+Unchanged by this upgrade: HSFZ framing, UDS decoders (the car's records), the read-only policy and
+redaction, scans against the loopback simulated car (pending, busy, two buses), the catalog search.
 
-## Results (last run on the development laptop, 2026-11-04)
+## Results (last run on the development laptop, 2026-11-05)
 
 ```
-TOTAL: 77 passed, 0 failed            (node tests/node/run_all.js)
+TOTAL: 87 passed, 0 failed            (node tests/node/run_all.js)
 Ran 24 tests ... OK                   (python -m unittest discover -s tests/python)
 ```
 
-## On the car (read-only, 2026-11-04)
+## Verified in simulation vs on the car
 
-Two read-only sessions over ENET (PROTOCOL_FINDINGS.md §0): the BDC variant, the 19-module layout and
-the colour read-back are **verified**; the decoders now carry the car's own record formats, and the mock
-BDC and the loopback simulator can be started with that layout (`G20_SLAVES`, `G20_BUS1/2`). The first
-session also exposed two tool bugs (pending not waited for, late reply misattributed) that are fixed and
-covered by tests.
-
-## What the tests do not cover
-
-- The real TASU service and the real BDC: the byte order inside `DA5E`, the NAD numbering, session or
-  security needs, and the visual effect are ASSUMED/UNKNOWN (PROTOCOL_FINDINGS.md) until the car tests
-  in NEXT_STEPS.md.
-- The kit's GPU renderer and the HMI: the harness fakes the head unit (the kit's `hu-stub.js` and the
-  live emulator `kit/tools/emu.js` can run the staged app for a visual check; the emulator answers no
-  diagnostics, so the mock link is what it shows).
-- Real ENET hardware: the simulator speaks the same framing on loopback.
+| | Simulation | Car |
+|---|---|---|
+| `2E DA5E` / `E3D1` per-module colour and brightness, release, timeout, no faults | yes | **yes (2026-11-04, over ENET)** |
+| Dual colour (upper / lower at once), zones, modes, fades, keep-alive timing, scheduler behaviour, preview/applied separation, rotary flow | yes | not yet: the app has not been installed on the head unit |
+| TASU latency and whether it accepts overlapping requests | assumed one at a time (kit evidence) | not measured |
+| Brightness values other than 100 | simulated | only 100 (and 0 by the OEM function) seen; the dial's other levels are untested on the car |
+| Colour Wave at an acceptable rate | 3.8 frames/s at 14 ms per write in simulation | depends on the head unit's TASU latency |
 
 ## Manual checks done
 
-- `python scripts/build_app.py`: the kit's own `build.py` built `dist/ambient_rgb@0.1.0.mgu` (827 KiB,
-  screens MAIN + SETTINGS with 11 states) from `app.json`, with a placeholder SDK (not installable).
-- `npm run preview`: the seven PNGs in `docs/screens/` were inspected (wheel, slider, swatch, status
-  pills, library chips, favourites, diagnostics).
+- `python scripts/build_app.py`: the kit's own `build.py` builds `dist/ambient_rgb@0.3.0.mgu` from `app.json`
+  (placeholder SDK, not installable).
+- `npm run preview`: the eleven PNGs in `docs/screens/` were inspected.

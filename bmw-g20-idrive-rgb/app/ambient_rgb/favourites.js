@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { hexToRgb, rgbToHex } = require('./colour');
+const S = require('./lighting_scene');
 
 const OEM = Object.freeze([
     { name: 'White', hex: '#90E090' }, { name: 'Bronze', hex: '#D76E14' }, { name: 'Orange', hex: '#931A01' },
@@ -20,19 +21,36 @@ class Favourites {
         this.file = dataDir ? path.join(dataDir, 'favourites.json') : null;
         this.log = log || { warn() {} };
         this.items = [];
+        this.configs = [];               // complete configurations: { name, program, saved }
         this.load();
     }
     load() {
-        this.items = [];
+        this.items = []; this.configs = [];
         if (!this.file) return;
         try {
             const j = JSON.parse(fs.readFileSync(this.file, 'utf8'));
             if (Array.isArray(j.items)) this.items = j.items.filter((i) => i && hexToRgb(i.hex)).map((i) => ({ name: String(i.name || i.hex).slice(0, 24), hex: rgbToHex(hexToRgb(i.hex)) })).slice(0, MAX);
+            if (Array.isArray(j.presets)) this.configs = j.presets.filter((p) => p && p.program).map((p) => S.presetFrom(p.name, p.program)).slice(0, MAX);
         } catch (e) { /* none yet */ }
     }
     save() {
         if (!this.file) return;
-        try { fs.writeFileSync(this.file, JSON.stringify({ items: this.items }, null, 1)); } catch (e) { this.log.warn('favourites: ' + e); }
+        try { fs.writeFileSync(this.file, JSON.stringify({ items: this.items, presets: this.configs.map((p) => ({ name: p.name, program: p.program, saved: p.saved })) }, null, 1)); } catch (e) { this.log.warn('favourites: ' + e); }
+    }
+    /** Complete configurations (colours, brightness, zones, mode, animation settings). */
+    presets() { return this.configs.slice(); }
+    addPreset(name, program) {
+        const p = S.presetFrom(name, program);
+        const i = this.configs.findIndex((x) => x.name === p.name);
+        if (i >= 0) this.configs[i] = p; else { if (this.configs.length >= MAX) this.configs.shift(); this.configs.push(p); }
+        this.save();
+        return p;
+    }
+    removePreset(name) {
+        const n = this.configs.length;
+        this.configs = this.configs.filter((x) => x.name !== name);
+        if (this.configs.length !== n) this.save();
+        return this.configs.length !== n;
     }
     oem() { return OEM.slice(); }
     list() { return this.items.slice(); }
