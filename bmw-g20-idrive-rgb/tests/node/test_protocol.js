@@ -9,7 +9,14 @@ test('layering write bytes follow the SGBD ARG order: DID NAD ZUSTAND HELLIGKEIT
     assert.deepStrictEqual(b, [0xDA, 0x5E, 3, 1, 100, 0xD7, 0x6E, 0x14, 10]);
     assert.strictEqual(P.hexBytes([0x2E].concat(b)), '2E DA 5E 03 01 64 D7 6E 14 0A');
 });
-test('bus 1 brightness is capped at 100, bus 2 at 255; seconds at 254; inactive = 0', () => {
+test('a colour byte is never 0xFF: the BDC treats FF as "no change" (verified on the car)', () => {
+    const b = P.encodeLayeringWrite({ bus: 1, nad: 3, brightness: 100, r: 255, g: 0, b: 0, seconds: 5 });
+    assert.deepStrictEqual(b, [0xDA, 0x5E, 3, 1, 100, 0xFE, 0, 0, 5]);
+    assert.strictEqual(P.encodeLayeringWrite({ bus: 2, nad: 1, brightness: 255, r: 255, g: 255, b: 255, seconds: 5 })[4], 254, 'bus 2 brightness capped at FE too');
+    assert.strictEqual(P.colourByte(300), 254);
+    assert.strictEqual(P.colourByte(254), 254);
+});
+test('bus 1 brightness is capped at 100, bus 2 at 254; seconds at 254; inactive = 0', () => {
     assert.strictEqual(P.encodeLayeringWrite({ bus: 1, nad: 1, brightness: 200, r: 1, g: 2, b: 3, seconds: 300 })[4], 100);
     const b2 = P.encodeLayeringWrite({ bus: 2, nad: 1, brightness: 200, r: 1, g: 2, b: 3, seconds: 300 });
     assert.deepStrictEqual(b2.slice(0, 2), [0xE3, 0xD1]);

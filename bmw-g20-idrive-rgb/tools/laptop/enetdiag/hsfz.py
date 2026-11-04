@@ -112,11 +112,13 @@ class EnetClient:
     def connected(self):
         return self.sock is not None
 
-    def request(self, dst, payload, overall_ms=4000, quiet_ms=400, first_ms=None, pending_ms=15000):
+    def request(self, dst, payload, overall_ms=4000, quiet_ms=400, first_ms=None, pending_ms=15000, until=None):
         """Send one diagnostic request and collect replies until quiet_ms pass without data
         (or overall_ms in all). A 'response pending' (7F sid 78) from the unit extends the wait by
         pending_ms (the BDC polls its LIN bus before answering DA5F, which takes seconds) and is not
-        returned. Returns the DIAG frames addressed to the tester, in order."""
+        returned. until(frame) -> True ends the wait at once (a physical request whose reply is known: no
+        quiet window, so the measured time is the unit's own latency). Returns the DIAG frames addressed to
+        the tester, in order."""
         if not self.connected:
             raise HsfzError("not connected")
         frame = Frame(TYPE_DIAG, TESTER, dst, payload)
@@ -159,6 +161,8 @@ class EnetClient:
                         last_data = None
                         continue
                     frames.append(f)
+                    if until is not None and until(f):
+                        return frames
         return frames
 
 

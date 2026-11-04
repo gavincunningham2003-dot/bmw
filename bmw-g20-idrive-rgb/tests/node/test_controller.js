@@ -38,9 +38,9 @@ test('enableCustom writes every slave with the colour and ZEIT, then the lights 
     assert.strictEqual(r.ok, true);
     const w = writes(c);
     assert.strictEqual(w.length, 13);
-    assert.deepStrictEqual(w[0].data, [0xDA, 0x5E, 1, 1, 100, 255, 0, 128, 10]);
+    assert.deepStrictEqual(w[0].data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 128, 10], '255 goes out as FE: FF would mean no change');
     assert.strictEqual(bdc.physical(7).source, 'custom');
-    assert.deepStrictEqual([bdc.physical(7).r, bdc.physical(7).g, bdc.physical(7).b], [255, 0, 128]);
+    assert.deepStrictEqual([bdc.physical(7).r, bdc.physical(7).g, bdc.physical(7).b], [254, 0, 128]);
 });
 test('keep-alive: the colour is re-sent before ZEIT lapses, so the lights never fall back while custom is on', async () => {
     const { c, bdc, clock } = make();
@@ -246,9 +246,21 @@ test('the car layout: 7 + 12 slaves on two buses, each written on its own bus wi
     assert.strictEqual(w.filter((x) => x.data[0] === 0xDA && x.data[1] === 0x5E).length, 7, 'bus 1 slaves go to DA5E');
     assert.strictEqual(bdc.physical(3, 2).source, 'custom', 'the dashboard driver line follows');
     const st = await c.readState();
-    assert.strictEqual(st.slaves.filter((s) => s.r === 255 && s.g === 0).length, 19, 'E3D1 / DA5F read back the custom colour on every module');
+    assert.strictEqual(st.slaves.filter((s) => s.r === 254 && s.g === 0).length, 19, 'E3D1 / DA5F read back the custom colour on every module');
     await c.disableCustom();
     assert.strictEqual(bdc.physical(3, 2).source, 'oem');
+});
+test('the mock BDC honours 0xFF as "no change" the way the car does', async () => {
+    const { c, bdc } = make();
+    await c.connect();
+    bdc.uds(0x40, 0x2E, [0xDA, 0x5E, 1, 1, 100, 0x00, 0xFE, 0x00, 5]);        // green
+    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [0, 254, 0]);
+    bdc.uds(0x40, 0x2E, [0xDA, 0x5E, 1, 1, 100, 0xFF, 0xFF, 0xFF, 5]);        // no change
+    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [0, 254, 0]);
+    c.setColour({ r: 255, g: 255, b: 255 });
+    await c.enableCustom();
+    assert.deepStrictEqual([bdc.physical(1).r, bdc.physical(1).g, bdc.physical(1).b], [254, 254, 254], 'the controller never sends FF');
+    await c.disableCustom();
 });
 test('every write the mock controller sends passes the allow list', async () => {
     const { c } = make();

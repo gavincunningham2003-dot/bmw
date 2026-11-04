@@ -29,6 +29,33 @@ What follows from this for the app: 19 RGB modules; bus 1 written with `2E DA5E`
 while another is pending; the `HELLIGKEIT` value the BDC reports is 100 on both buses even though the
 ARG table caps bus 1 at 100 and bus 2 at 255.
 
+### 0.1 The write, verified (2026-11-04, `tools/laptop/write_test.py`, one frame per step, each approved)
+
+| Frame to 0x40 | Reply | Read-back `22 DA 5F` ~1 s later | Seen |
+|---|---|---|---|
+| `2E DA 5E 01 01 64 FF 00 00 05` (OEM lighting on) | `6E DA 5E`, 421 ms, **default session** | NAD 1 unchanged, Violet @100 | no change |
+| same again; `2E DA 5E 03 01 64 FF 00 00 05` (OEM on) | `6E DA 5E` | unchanged | no change |
+| OEM ambient lighting switched **off** in iDrive: `22 DA 5F` | | every module brightness **0**, colour bytes still `FE 3C 78` | dark |
+| `2E DA 5E 03 01 64 FF 00 00 05` (OEM off) | `6E DA 5E` | NAD 3 **brightness 100**, others 0, colour unchanged | **lit, Violet** |
+| `2E DA 5E 03 01 64 00 FF 00 05` (OEM off) | `6E DA 5E` | NAD 3 **rgb 0 255 0 @100** | **lit green** |
+| `2E DA 5E 03 01 64 FE 00 00 05` (OEM off) | `6E DA 5E` | NAD 3 **rgb 254 0 0 @100** | (red) |
+
+Established by this:
+- **`2E DA5E` is accepted in the default session; no `10 03`, no security access.**
+- **The argument order is the ARG table order**: NAD, ZUSTAND, HELLIGKEIT, ROT, GRUEN, BLAU, ZEIT, one byte each. The module lit at the brightness sent; the colour bytes are applied and the status read reports the live LEDs.
+- **A colour byte of `0xFF` is "no change"**: `FF 00 00` left the colour as it was; `FE 00 00` gave red. Colour bytes are capped at `0xFE` in `lighting_protocol.js`, the mock and `write_test.py` (the community coding tools fold FF to FE for the same reason).
+- NAD n in the write = record n of `22 DA 5F` (NAD 3 = the passenger front door contour line, as listed).
+- The module lit ~1 s after the request and the status showed it still driven a second later; the ZEIT timeout itself (return to OEM after 5 s) was not read back and should be confirmed with one `22 DA 5F` after the time.
+- **The actuator overrides the OEM function while it is on**: with the ambient lighting switched back on (library White `90 E0 90` on every module), `2E DA 5E 03 01 64 FE 00 00 05` read back NAD 3 at `254 0 0 @100` while the other modules stayed White. The three earlier "no change" results with OEM on had sent `FF 00 00` (no colour change) and were inconclusive. **The app needs no OEM precondition.**
+- **Colour cycle seen by eye**: seven writes to NAD 3 three seconds apart (red `FE0000`, orange `FE6000`, yellow `FEFE00`, green `00FE00`, cyan `00FEFE`, blue `0000FE`, magenta `FE00FE`, ZEIT 5), all `6E DA 5E`, the contour line stepped through every colour and returned to white by itself. **The control path of this project is verified on the car.**
+- The ~430 ms per exchange in the first logs was the tool's 400 ms quiet window; `write_test.py` now returns as soon as the BDC's reply is in, so later logs show the real latency.
+- **Bus 2 verified**: `2E E3 D1 01 01 64 FE 00 00 05` (dashboard centre line) → `6E E3 D1` in **14 ms**, read-back `254 0 0 @100` with the other modules White. Brightness 100 works on bus 2 as on bus 1 (the OEM function also drives bus 2 at 100, so the ARG table's 0..255 is not the practical range).
+- **Latency: 14 ms per write** once the tool stops waiting for a quiet window. A round over all 19 modules is therefore ~0.3 s over ENET; the head unit's TASU path is expected to be of the same order.
+- **Release frame verified**: `2E E3 D1 01 01 64 FE 00 00 0A` (red, 10 s) then after 3 s `2E E3 D1 01 00 00 00 00 00 00` → `6E E3 D1` in 15 ms and the read-back showed the module back at the OEM White `144 224 144 @100` at once, long before the 10 s would have lapsed. **ZUSTAND 0 / ZEIT 0 hands the module straight back to the OEM function**: the app's Custom off / Restore OEM is immediate.
+- **The dashboard line is three modules** (bus 2 NAD 1 centre, 2 passenger, 3 driver): a write to NAD 1 alone changed only the centre segment; writes to all three (`2E E3 D1 0n 01 64 FE 00 00 05`, accepted in 0 ms each) changed the whole strip. The same split applies to every door (contour line, door opener, map pocket): the app writes all 19 modules per round.
+- **BDC fault memory after 16 writes: empty** (`59 02 4F`, same as the baseline). The actuator leaves no stored fault.
+- Not yet tried: brightness other than 100, NAD 0, a `22 DA 5F` after ZEIT to see the timeout return in the data (seen by eye only).
+
 ## 1. Transport: MGU diagnostic gateway (TASU)
 
 | Item | Value | Status | Source |

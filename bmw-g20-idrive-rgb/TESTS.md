@@ -9,13 +9,13 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Node (66 tests, all passing)
+## Node (68 tests, all passing)
 
 | File | Covers |
 |---|---|
 | `test_colour.js` (10) | RGB↔HSV round trips, primaries, hex parsing, the FF→FE coding rule, the wheel's angle convention (hue 0 at 12 o'clock, clockwise: the kit's arc convention), `wheelPos` ↔ `wheelHit`, the RGBA wheel, the vector wheel rasterising, nudging, luma |
-| `test_protocol.js` (9) | the exact `2E DA5E` bytes and their order, bus 1/2 brightness caps, NAD range, every decoder (reply, SGBD index, LIN 1/2 status, PWM, FASTA, SVK), and the **allow list** (`checkRequest`): what may leave and what may not |
-| `test_controller.js` (22) | on the mock BDC with fake timers: probing, no writes before Apply, every slave written with ZEIT, **keep-alive before ZEIT lapses**, **fall-back to OEM after ZEIT without the app (reversibility)**, coalescing of bursts, Restore OEM, auto-off after N refusals, skipping a refusing slave, extended-session retry and S3 lapse, busy, **timeouts**, **offline BDC**, **link loss mid-session and reconnection**, **restart behaviour**, variant gates, status snapshot, shutdown, allow list on every byte |
+| `test_protocol.js` (10) | the exact `2E DA5E` bytes and their order, bus 1/2 brightness caps, NAD range, every decoder (reply, SGBD index, LIN 1/2 status, PWM, FASTA, SVK), and the **allow list** (`checkRequest`): what may leave and what may not |
+| `test_controller.js` (23) | on the mock BDC with fake timers: probing, no writes before Apply, every slave written with ZEIT, **keep-alive before ZEIT lapses**, **fall-back to OEM after ZEIT without the app (reversibility)**, coalescing of bursts, Restore OEM, auto-off after N refusals, skipping a refusing slave, extended-session retry and S3 lapse, busy, **timeouts**, **offline BDC**, **link loss mid-session and reconnection**, **restart behaviour**, variant gates, status snapshot, shutdown, allow list on every byte |
 | `test_bdc_uds.js` (12) | the real `kit/diag.js` on a faked TASU bus routed into the mock BDC with another app's DME frames mixed in: probe, **disarmed = dry runs only**, armed bytes, ZEIT cap, **unknown variant refused**, no slaves refused, `10 03` retry, transport away/back, loss mid-session, timeout, the gate against forged `14/2E coding/31/2F/10 02`, every byte of a session allowed |
 | `test_favourites.js` (4) | add/has/remove/persist/reload, MAX, damaged file, in-memory |
 | `test_ui.js` (9) | `main.js` through the harness: pages and targets, wheel and slider taps, Apply/Restore through on-page buttons and HMI bar buttons, live nudge while custom is on, favourites save/pick/delete, diagnostics page and probe, the iDrive knob (turn, press, grab follows page and setting), switching the link to the car without a transport, settings feeding the controller |
@@ -33,7 +33,7 @@ npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a 
 ## Results (last run on the development laptop, 2026-11-04)
 
 ```
-TOTAL: 66 passed, 0 failed            (node tests/node/run_all.js)
+TOTAL: 68 passed, 0 failed            (node tests/node/run_all.js)
 Ran 24 tests ... OK                   (python -m unittest discover -s tests/python)
 ```
 

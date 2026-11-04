@@ -98,7 +98,11 @@ class MockBdc {
             if (nad > 31) return neg(0x31);
             const s = this.slaves.find((x) => x.nad === nad && x.bus === (did === P.DID.LIN2_LAYERING ? 2 : 1));
             if (!s) return neg(0x31);
-            s.active = data[3] === 1; s.brightness = data[4]; s.r = data[5]; s.g = data[6]; s.b = data[7];
+            // as the car: a colour byte of 0xFF leaves that channel unchanged
+            s.active = data[3] === 1; s.brightness = data[4];
+            if (data[5] !== 0xFF) s.r = data[5];
+            if (data[6] !== 0xFF) s.g = data[6];
+            if (data[7] !== 0xFF) s.b = data[7];
             s.until = data[3] === 1 ? this.now() + data[8] * 1000 : 0;
             return [0x6E, data[0], data[1]];
         }

@@ -108,16 +108,23 @@ const didBytes = (did) => [(did >> 8) & 0xFF, did & 0xFF];
  * p = { bus: 1|2, nad: 0..31, active: bool, brightness, r, g, b, seconds }
  * brightness is "elektrische Helligkeit aller Grundfarben": 0..100 on bus 1 (DA5E), 0..255 on bus 2 (E3D1).
  * Returns the request bytes after the service id (so diag.physical(0x40, 0x2E, bytes)).
+ *
+ * VERIFIED on the car (G20 330e, BDC 0F2680, 2026-11-04, bus 1 NAD 3): accepted in the default session, the
+ * module lit at the brightness sent, and 00 FF 00 / FE 00 00 read back as green / red in this R, G, B order.
+ * A colour byte of 0xFF is NOT applied (FF 00 00 left the colour unchanged): 0xFF means "no change", so every
+ * colour byte is capped at 0xFE here (the community coding tools fold FF to FE for the same reason).
  */
+const NO_CHANGE = 0xFF;
+const colourByte = (n) => Math.min(NO_CHANGE - 1, byte(n));
 function encodeLayeringWrite(p) {
     const bus = p.bus === 2 ? 2 : 1;
     const did = bus === 2 ? DID.LIN2_LAYERING : DID.LIN1_LAYERING_CTRL;
     const nad = byte(p.nad);
     if (nad > 31) throw new RangeError('NAD must be 0..31 (SGBD ARG range), got ' + nad);
-    const maxB = bus === 2 ? 255 : 100;
+    const maxB = bus === 2 ? 254 : 100;
     const brightness = Math.min(maxB, byte(p.brightness == null ? maxB : p.brightness));
     const seconds = Math.min(254, byte(p.seconds == null ? 10 : p.seconds));
-    return didBytes(did).concat([nad, p.active === false ? 0 : 1, brightness, byte(p.r), byte(p.g), byte(p.b), seconds]);
+    return didBytes(did).concat([nad, p.active === false ? 0 : 1, brightness, colourByte(p.r), colourByte(p.g), colourByte(p.b), seconds]);
 }
 
 /** 2E D519: ambient brightness offset 0..255 (formula "laut LH (1109)" - unknown; read-only interest for now). */
@@ -239,7 +246,7 @@ function checkRequest(target, sid, data) {
 
 module.exports = {
     ADDR, SID, DID, VARIANTS, NRC, LOCATION, MODES, PWM_ELEMENTS, SVK_TYPES, WRITE_DIDS,
-    byte, hex, hex16, hexBytes, didBytes,
+    byte, hex, hex16, hexBytes, didBytes, colourByte, NO_CHANGE,
     encodeLayeringWrite, encodeBrightnessOffset, encodeModeWrite, encodeRead,
     decodeReply, decodeSgbdIndex, decodeLinStatus, decodeLin1Status, decodeLin2Status, decodePwmStatus, decodeFasta, decodeSvk, SLAVE_RECORD,
     checkRequest,

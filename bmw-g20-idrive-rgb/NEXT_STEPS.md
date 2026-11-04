@@ -21,9 +21,19 @@
 Still worth reading (root SSH needed): `/etc/oap/someip/someip-interfaces.json` for
 `catalog_search.py` (Approach 1), and `kit/tools/check_signals.py` against it for `app.json`.
 
-## 2. The first write test (the only risky step, and it is small)
+## 1a. The write test: DONE and VERIFIED (2026-11-04, evening)
 
-Not scheduled. It happens only when you decide, and it is a separate decision from everything above.
+`2E DA 5E 03 01 64 00 FF 00 05` lit the passenger front door contour line green and read back
+`0 255 0 @100`; `FE 00 00` read back red. Accepted in the default session, no security access. `0xFF`
+in a colour byte means "no change" (now capped at `0xFE` everywhere). Full table: PROTOCOL_FINDINGS.md §0.1.
+What remains on the car, one frame per step as before: (a) the same red write with the OEM ambient
+lighting ON, because every earlier OEM-on attempt sent `FF 00 00` and proved nothing; (b) a `22 DA 5F`
+after ZEIT to confirm the module returns to OEM by itself; (c) `19 02 0C` to see whether any fault was
+stored; (d) one bus-2 module via `2E E3D1` (the dashboard centre line); (e) the release frame.
+
+## 2. The first write test (as planned before it was run)
+
+Kept for the record. It was run step by step on 2026-11-04 with the results above.
 
 Preconditions: stationary, parking brake, ignition on, charger connected (≥ 12.5 V), BDC fault memory
 read beforehand (the Fault Scanner app or ISTA; the laptop tool does not read DTCs on purpose), the

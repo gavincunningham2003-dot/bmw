@@ -5,8 +5,11 @@ factory ambient lighting, a `LightingController` abstraction with a complete sim
 controller, and a read-only ENET discovery tool for the laptop.
 
 Target car: 2020 BMW G20 330e, right-hand drive, MGU head unit, factory ambient lighting, BDC body
-controller. Nothing here has been run on that car yet: the app, the protocol and the tests are built
-on public documentation and the public MGU App Kit, and every write path is gated and dry-run by default.
+controller. **The control path is verified on that car (2026-11-04):** the body controller's documented
+actuator accepted per-module RGB writes over ENET in the default session, a door contour line stepped
+through seven colours by eye, and the modules return to the OEM colour by themselves (PROTOCOL_FINDINGS.md
+§0.1). The app itself has not been installed on the head unit yet; every write path in it is gated and
+dry-run by default.
 
 ![The Colour page](docs/screens/03-colour-custom-on.png)
 
