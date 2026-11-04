@@ -426,8 +426,10 @@ mgu.run({
             try { [drawColours, drawDual, drawModes, drawFavourites, drawDiagnostics][page](cv, t); } catch (e) { log.error('draw page ' + page, e); }
             if (flash && Date.now() < flash.until) {
                 const w = Math.min(1500, cv.textWidth(flash.text, 20, { font: 'bold' }) + 60);
-                cv.roundRect(800 - w / 2, 470, w, 40, 20, withAlpha('#000000', 0.78));
-                cv.text(flash.text, 800, 497, 20, '#ffffff', { align: 'center', font: 'bold' });
+                // over the page's title line, clear of the action rows at the bottom
+                cv.roundRect(800 - w / 2, 50, w, 40, 20, withAlpha('#000000', 0.82));
+                cv.strokeRoundRect(800 - w / 2, 50, w, 40, 20, 1, withAlpha('#ffffff', 0.25));
+                cv.text(flash.text, 800, 77, 20, '#ffffff', { align: 'center', font: 'bold' });
             } else flash = null;
             return ctx.ui.image('MAIN_GFX', cv);
         });
