@@ -23,26 +23,36 @@ class Scanner:
         self.pace_ms = pace_ms
         self.exchanges = []          # every request / reply, for the report
 
-    def read(self, dst, dids, overall_ms=3000, quiet_ms=250):
-        """22 <dids> to one unit: uds.Reply (positive data split by DID) or None without an answer."""
+    def read(self, dst, dids, overall_ms=3000, quiet_ms=250, busy_retries=3):
+        """22 <dids> to one unit: uds.Reply (positive data split by DID) or None without an answer.
+        Only a reply that echoes one of the requested identifiers (or a 7F 22) counts: another unit's or an earlier
+        request's late reply on the same connection is not ours. NRC 21 (busy) is retried after a second."""
         req = uds.read_request(*dids)
         check(dst, req)
-        t0 = time.monotonic()
-        try:
-            frames = self.client.request(dst, req, overall_ms=overall_ms, quiet_ms=quiet_ms)
-        except HsfzError as e:
-            self._record(dst, req, None, t0, str(e))
-            return None
+        markers = [bytes([0x62, d >> 8, d & 0xFF]) for d in dids]
         reply = None
-        for f in frames:
-            if f.src != dst:
+        for attempt in range(busy_retries + 1):
+            t0 = time.monotonic()
+            try:
+                frames = self.client.request(dst, req, overall_ms=overall_ms, quiet_ms=quiet_ms)
+            except HsfzError as e:
+                self._record(dst, req, None, t0, str(e))
+                return None
+            reply = None
+            for f in frames:
+                if f.src != dst:
+                    continue
+                p = f.payload
+                if any(p.startswith(m) for m in markers) or (len(p) >= 3 and p[0] == 0x7F and p[1] == 0x22):
+                    reply = uds.Reply(p)
+                else:
+                    log.info("uds %02X: ignored a frame that is not this request's reply: %s", dst, uds.hexs(p)[:60])
+            self._record(dst, req, reply, t0, None if attempt == 0 else "retry %d" % attempt)
+            time.sleep(self.pace_ms / 1000.0)
+            if reply is not None and not reply.positive and reply.nrc == 0x21 and attempt < busy_retries:
+                time.sleep(1.0)
                 continue
-            r = uds.Reply(f.payload)
-            if not r.positive and r.nrc == 0x78:
-                continue
-            reply = r
-        self._record(dst, req, reply, t0, None)
-        time.sleep(self.pace_ms / 1000.0)
+            return reply
         return reply
 
     def discover_units(self, overall_ms=6000, quiet_ms=1500):
@@ -61,11 +71,16 @@ class Scanner:
         self._record(FUNCTIONAL, req, None, t0, "%d units answered" % len(units))
         return units
 
+    PRIVATE_DIDS = (b"\xF1\x90", b"\xF1\x8C")      # VIN, serial: never in the exchange log, not even as hex
+
     def _record(self, dst, req, reply, t0, note):
-        e = {"dst": "%02X" % dst, "request": uds.hexs(req), "reply": reply.to_dict() if reply else None,
+        shown = reply.to_dict() if reply else None
+        if shown and reply.positive and any(d in req for d in self.PRIVATE_DIDS):
+            shown["raw"] = shown["raw"][:8] + " [redacted]"
+        e = {"dst": "%02X" % dst, "request": uds.hexs(req), "reply": shown,
              "ms": int((time.monotonic() - t0) * 1000), "note": note}
         self.exchanges.append(e)
-        log.info("uds %02X <- %s | %s%s", dst, e["request"], (reply.to_dict()["raw"] if reply else "no reply"), (" | " + note) if note else "")
+        log.info("uds %02X <- %s | %s%s", dst, e["request"], (shown["raw"] if shown else "no reply"), (" | " + note) if note else "")
 
     def identify(self, dst):
         """Identification of one unit, one DID per request (a unit may refuse multi-DID reads)."""
@@ -102,7 +117,8 @@ class Scanner:
         out = {"address": "%02X" % dst, "reads": {}}
         for did in BDC_LIGHT_DIDS:
             name = uds.DID_NAME.get(did, "%04X" % did)
-            r = self.read(dst, [did])
+            # the LIN status reads make the BDC poll its slaves first: 'pending', then the reply seconds later
+            r = self.read(dst, [did], overall_ms=10000, quiet_ms=400)
             if r is None:
                 out["reads"][name] = {"did": "%04X" % did, "result": "no reply"}
                 continue

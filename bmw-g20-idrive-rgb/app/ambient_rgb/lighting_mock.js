@@ -16,7 +16,12 @@
 const P = require('./lighting_protocol');
 const { LightingController } = require('./lighting_controller');
 
-const DEFAULT_SLAVES = [0x13, 0x15, 0x17, 0x05, 0x06, 0x0C, 0x0D, 0x09, 0x10, 0x01, 0x03, 0x2B, 0x2D];   // a G20-like set of locations
+const DEFAULT_SLAVES = [0x13, 0x15, 0x17, 0x05, 0x06, 0x0C, 0x0D, 0x09, 0x10, 0x01, 0x03, 0x2B, 0x2D];   // a generic set, one bus (the tests count on 13)
+/** The layout read from the car on 2026-11-04 (G20 330e, BDC 0F2680): 7 slaves on FI-LIN-1, 12 on FI-LIN-2, by NAD order. */
+const G20_SLAVES = Object.freeze({
+    bus1: [0x0F, 0x0E, 0x0C, 0x12, 0x22, 0x10, 0x04],
+    bus2: [0x15, 0x17, 0x13, 0x01, 0x03, 0x08, 0x07, 0x05, 0x0B, 0x21, 0x09, 0x02],
+});
 
 class MockBdc {
     constructor(opts) {
@@ -32,15 +37,29 @@ class MockBdc {
         this.busyOnce = !!o.busyOnce;
         this.offline = !!o.offline;
         this.session = 1; this.sessionAt = 0;
-        this.slaves = (o.slaves || DEFAULT_SLAVES).map((loc, i) => ({ bus: 1, nad: i + 1, locationId: loc, active: false, r: 0, g: 0, b: 0, brightness: 0, until: 0 }));
+        const mk = (bus) => (loc, i) => ({ bus, nad: i + 1, locationId: loc, active: false, r: 0, g: 0, b: 0, brightness: 0, until: 0 });
+        this.slaves = (o.slaves || DEFAULT_SLAVES).map(mk(1)).concat((o.slaves2 || []).map(mk(2)));
         this.requests = [];                                          // every request seen: { target, sid, data }
     }
     _sessionOk() { if (this.session === 3 && this.now() - this.sessionAt > this.s3Ms) this.session = 1; return this.session === 3; }
     /** The colour a slave shows right now (the physical LEDs), for tests and the UI preview. */
-    physical(nad) {
-        const s = this.slaves.find((x) => x.nad === nad) || this.slaves[0];
+    physical(nad, bus) {
+        const s = this.slaves.find((x) => x.nad === nad && x.bus === (bus || 1)) || this.slaves[0];
         if (s && s.active && this.now() < s.until) return { r: s.r, g: s.g, b: s.b, source: 'custom', brightness: s.brightness };
         return this.oemOn ? Object.assign({ source: 'oem', brightness: 100 }, this.oem) : { r: 0, g: 0, b: 0, source: 'off', brightness: 0 };
+    }
+    /** RES_0xDA5F_D / RES_0xE3D1_D: 26 ten-byte records (location, b, g, r, brightness, white, 4 faults) + a trailing byte. */
+    _linStatus(bus) {
+        const b = [];
+        const mine = this.slaves.filter((x) => x.bus === bus);
+        for (let i = 0; i < 26; i++) {
+            const s = mine[i];
+            if (!s) { b.push(0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x03, 0x07, 0x07, 0x07, 0x07); continue; }
+            const ph = this.physical(s.nad, bus);
+            b.push(s.locationId, ph.b, ph.g, ph.r, ph.brightness, 0, 0, 0, 0, 0);
+        }
+        b.push(0x02);
+        return b;
     }
     /** UDS request -> reply bytes (after the transport), or null for no reply. */
     uds(target, sid, data) {
@@ -61,10 +80,10 @@ class MockBdc {
                 case P.DID.SGBD_INDEX: return out.concat([parseInt(this.sgbdIndex.slice(0, 2), 16), parseInt(this.sgbdIndex.slice(2, 4), 16), parseInt(this.sgbdIndex.slice(4, 6), 16)]);
                 case P.DID.SVK: return out.concat([1, 0, 0, 0x8B, 0x1B, 0, 1, 1, 6, 0, 0, 0x3F, 0x36, 0, 15, 2, 5, 0, 0, 0x51, 0xDD, 0, 17, 72, 8, 0, 0, 0x9A, 0x01, 0, 15, 2]);
                 case P.DID.VIN: return out.concat(Array.from('WBA0MOCK000000000').map((c) => c.charCodeAt(0)));
-                case P.DID.LIN1_LAYERING_STATUS: { const b = []; for (let i = 0; i < 26; i++) { const s = this.slaves[i]; b.push(s ? s.locationId : 0xFF); } return out.concat(b); }
-                case P.DID.LIN2_LAYERING: return out.concat([0xFF, 0, 0, 0, 0]);     // nothing on the second bus in this mock
+                case P.DID.LIN1_LAYERING_STATUS: return out.concat(this._linStatus(1));
+                case P.DID.LIN2_LAYERING: return out.concat(this._linStatus(2));     // nothing on the second bus in this mock
                 case P.DID.INNENLICHT_PWM: return out.concat([0, 64, 64, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
-                case P.DID.FASTA_LIGHT: return out.concat([0, 0x12, 0x34, 0x56, 0, 0, 0x10, 0, 0, 0, 0x01, 0]).concat(this.slaves.map((s) => s.locationId));
+                case P.DID.FASTA_LIGHT: return out.concat([0, 0x12, 0x34, 0x56, 1, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0, 0, 0x10, 0]).concat(this.slaves.map((s) => s.locationId));
                 default: return neg(0x31);
             }
         }
@@ -108,14 +127,16 @@ class MockLightingController extends LightingController {
         const ident = P.decodeReply(P.SID.READ, P.DID.SGBD_INDEX, this._exchange(P.SID.READ, P.encodeRead(P.DID.SGBD_INDEX)));
         const variant = ident.ok ? P.decodeSgbdIndex(ident.data) : null;
         const st = P.decodeReply(P.SID.READ, P.DID.LIN1_LAYERING_STATUS, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN1_LAYERING_STATUS)));
-        const slaves = st.ok ? P.decodeLin1Status(st.data) : [];
+        const st2 = P.decodeReply(P.SID.READ, P.DID.LIN2_LAYERING, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN2_LAYERING)));
+        const slaves = (st.ok ? P.decodeLin1Status(st.data) : []).concat(st2.ok ? P.decodeLin2Status(st2.data) : []);
         return { available: true, transport: 'mock', bdcReachable: ident.ok, variant, rgbActuator: variant ? variant.rgbActuator : 'unknown', slaves, verified: { layeringWrite: 'simulated' }, notes: ['simulated BDC: nothing reaches a car'] };
     }
     async _readSlaves() {
         const st = P.decodeReply(P.SID.READ, P.DID.LIN1_LAYERING_STATUS, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN1_LAYERING_STATUS)));
         if (!st.ok) return null;
+        const st2 = P.decodeReply(P.SID.READ, P.DID.LIN2_LAYERING, this._exchange(P.SID.READ, P.encodeRead(P.DID.LIN2_LAYERING)));
         const known = this.slaves;
-        return P.decodeLin1Status(st.data).map((s) => Object.assign({}, known.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s));
+        return P.decodeLin1Status(st.data).concat(st2.ok ? P.decodeLin2Status(st2.data) : []).map((s) => Object.assign({}, known.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s));
     }
     async _writeSlave(slave, params) {
         const bytes = P.encodeLayeringWrite({ bus: slave.bus, nad: slave.nad, active: params.active, brightness: params.brightness, r: params.r, g: params.g, b: params.b, seconds: params.seconds });
@@ -137,4 +158,4 @@ class MockLightingController extends LightingController {
     status() { return Object.assign(super.status(), { lastRequest: this.lastRequest || null, lastReply: this.lastReply || null }); }
 }
 
-module.exports = { MockBdc, MockLightingController, DEFAULT_SLAVES };
+module.exports = { MockBdc, MockLightingController, DEFAULT_SLAVES, G20_SLAVES };

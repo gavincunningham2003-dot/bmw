@@ -12,6 +12,9 @@ from .hsfz import Frame, TYPE_ACK, TYPE_DIAG, TESTER, FUNCTIONAL, split_frames, 
 
 FAKE_VIN = "WBA5R71070AB12345"
 DEFAULT_SLAVES = [0x13, 0x15, 0x17, 0x05, 0x06, 0x0C, 0x0D, 0x09, 0x10, 0x01, 0x03, 0x2B, 0x2D]
+# the real G20 330e layout (2026-11-04): FI-LIN-1 passenger side, FI-LIN-2 dashboard + front footwells + driver side
+G20_BUS1 = [0x0F, 0x0E, 0x0C, 0x12, 0x22, 0x10, 0x04]
+G20_BUS2 = [0x15, 0x17, 0x13, 0x01, 0x03, 0x08, 0x07, 0x05, 0x0B, 0x21, 0x09, 0x02]
 
 
 def _svk():
@@ -60,19 +63,27 @@ class FakeEcu:
 
 
 class FakeBdc(FakeEcu):
-    def __init__(self, slaves=None, sgbd_index="0F2680"):
+    def __init__(self, slaves=None, sgbd_index="0F2680", slaves2=None):
         self.slaves = slaves or DEFAULT_SLAVES
+        self.slaves2 = slaves2 or []
         super().__init__(0x40, sgbd_index)
+
+    @staticmethod
+    def _records(locs):
+        out = bytearray()
+        for i in range(26):
+            out += bytes([locs[i], 0xFE, 0x3C, 0x78, 0x64, 0, 0, 0, 0, 0]) if i < len(locs) else bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x03, 0x07, 0x07, 0x07, 0x07])
+        return bytes(out) + b"\x02"
 
     def did(self, did):
         if did == 0xDA5F:
-            return bytes(self.slaves[i] if i < len(self.slaves) else 0xFF for i in range(26))
+            return self._records(self.slaves)
         if did == 0xE3D1:
-            return bytes([0xFF, 0, 0, 0, 0])
+            return self._records(self.slaves2)
         if did == 0x4800:
             return bytes([0, 64, 64, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0])
         if did == 0x2300:
-            return struct.pack(">III", 0x123456, 0x1000, 0x10) + bytes(self.slaves)
+            return struct.pack(">IBIIIBIII", 0x123456, 1, 5, 6, 0x1000, 0, 0, 0x2000, 0x10) + bytes(self.slaves)
         return super().did(did)
 
 

@@ -148,40 +148,49 @@ function decodeSgbdIndex(data) {
     return Object.assign({ index: idx }, VARIANTS[idx] || { sgbd: null, description: 'unknown body controller variant', rgbActuator: 'unknown' });
 }
 
-/** 62 DA 5F: one Verbauort byte per slave position (RES_0xDA5F_D STAT_SLAVE_VERBAUORT_NAD1..NAD52). */
-function decodeLin1Status(data) {
-    const slaves = [];
-    Array.prototype.forEach.call(data || [], (loc, i) => {
-        if (loc === 0xFF || loc === 0x00) return;
-        slaves.push({ bus: 1, nad: i + 1, locationId: loc, location: LOCATION[loc] || ('location 0x' + hex(loc)) });
-    });
-    return slaves;
-}
-
 /**
- * 62 E3 D1: per slave (RES_0xE3D1_D order) Verbauort, blue, green, red, brightness - 5 bytes each.
- * NOTE the reference lists BLUE before GREEN before RED; kept as documented, to be confirmed on a car.
+ * 62 DA 5F / 62 E3 D1: RES_0xDA5F_D and RES_0xE3D1_D are identical: per NAD a 10-byte record
+ * Verbauort, LED blue, LED green, LED red, brightness, white (footwell) LED, short-circuit, over-temperature,
+ * open-load, internal fault. An empty slot reads FF FF FF FF 7F 03 07 07 07 07. A trailing byte follows the records.
+ * CONFIRMED on the car (G20 330e, BDC 0F2680, 2026-11-04): 7 slaves on bus 1 read back 78 3C FE at 100 = the "Violet" preset.
  */
-function decodeLin2Status(data) {
+const SLAVE_RECORD = 10;
+function decodeLinStatus(data, bus) {
     const slaves = [];
-    for (let i = 0; i + 5 <= (data || []).length; i += 5) {
-        const loc = data[i];
+    const d = data || [];
+    for (let i = 0; i + SLAVE_RECORD <= d.length; i += SLAVE_RECORD) {
+        const loc = d[i];
         if (loc === 0xFF || loc === 0x00) continue;
-        slaves.push({ bus: 2, nad: i / 5 + 1, locationId: loc, location: LOCATION[loc] || ('location 0x' + hex(loc)), b: data[i + 1], g: data[i + 2], r: data[i + 3], brightness: data[i + 4] });
+        slaves.push({
+            bus, nad: i / SLAVE_RECORD + 1, locationId: loc, location: LOCATION[loc] || ('location 0x' + hex(loc)),
+            b: d[i + 1], g: d[i + 2], r: d[i + 3], brightness: d[i + 4], white: d[i + 5],
+            faults: { shortCircuit: d[i + 6], overTemp: d[i + 7], openLoad: d[i + 8], internal: d[i + 9] },
+        });
     }
     return slaves;
 }
+function decodeLin1Status(data) { return decodeLinStatus(data, 1); }
+function decodeLin2Status(data) { return decodeLinStatus(data, 2); }
 
 /** 62 48 00: PWM % per element in TAB_INNENLICHT order (RES_0x4800_D, 13 bytes). */
 function decodePwmStatus(data) {
     return PWM_ELEMENTS.map((e, i) => ({ id: e[0], name: e[1], pwm: data && i < data.length ? data[i] : null }));
 }
 
-/** 62 23 00: FASTA statistics (RES_0x2300_D): three u32 seconds, then slave locations. */
+/**
+ * 62 23 00: FASTA statistics (RES_0x2300_D): u32 reference time, u8 light sword fitted, u32 LS via HU, u32 LS via button,
+ * u32 LS duration, u8 panorama roof light fitted, u32 PaDa via HU, u32 ambient/PaDa duration, u32 reduced while driving,
+ * then one location byte per slave.
+ */
 function decodeFasta(data) {
-    if (!data || data.length < 12) return null;
+    if (!data || data.length < 30) return null;
     const u32 = (i) => ((data[i] << 24) >>> 0) + (data[i + 1] << 16) + (data[i + 2] << 8) + data[i + 3];
-    return { bdcActiveSeconds: u32(0), ambientOnSeconds: u32(4), ambientReducedWhileDrivingSeconds: u32(8), slaves: decodeLin1Status(Array.prototype.slice.call(data, 12)) };
+    // On the car the record is ~290 bytes: the leading fields are followed by more counters than the rows read so far
+    // name, and the 52 slave locations (26 per bus, NAD order) are its LAST 52 bytes. The leading values are TENTATIVE.
+    const start = data.length > 30 + 52 ? data.length - 52 : 30;
+    const locs = [];
+    for (let i = start; i < data.length; i++) if (data[i] !== 0 && data[i] !== 0xFF) locs.push({ index: i - start + 1, bus: (i - start) < 26 ? 1 : 2, nad: ((i - start) % 26) + 1, locationId: data[i], location: LOCATION[data[i]] || ('location 0x' + hex(data[i])) });
+    return { bdcActiveSeconds: u32(0), lightSwordFitted: data[4], lightSwordOnSeconds: u32(13), panoramaRoofLightFitted: data[17], ambientOnSeconds: u32(22), ambientReducedWhileDrivingSeconds: u32(26), leadingFieldsTentative: true, slaveLocations: locs };
 }
 
 /** 62 F1 01: SVK records (adapted from idrive7-8-ssh-root mgu7/diag.py, Unlicense). */
@@ -232,6 +241,6 @@ module.exports = {
     ADDR, SID, DID, VARIANTS, NRC, LOCATION, MODES, PWM_ELEMENTS, SVK_TYPES, WRITE_DIDS,
     byte, hex, hex16, hexBytes, didBytes,
     encodeLayeringWrite, encodeBrightnessOffset, encodeModeWrite, encodeRead,
-    decodeReply, decodeSgbdIndex, decodeLin1Status, decodeLin2Status, decodePwmStatus, decodeFasta, decodeSvk,
+    decodeReply, decodeSgbdIndex, decodeLinStatus, decodeLin1Status, decodeLin2Status, decodePwmStatus, decodeFasta, decodeSvk, SLAVE_RECORD,
     checkRequest,
 };

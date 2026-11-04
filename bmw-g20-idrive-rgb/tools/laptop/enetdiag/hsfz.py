@@ -112,9 +112,11 @@ class EnetClient:
     def connected(self):
         return self.sock is not None
 
-    def request(self, dst, payload, overall_ms=4000, quiet_ms=400, first_ms=None):
+    def request(self, dst, payload, overall_ms=4000, quiet_ms=400, first_ms=None, pending_ms=15000):
         """Send one diagnostic request and collect replies until quiet_ms pass without data
-        (or overall_ms in all). Returns the DIAG frames addressed to the tester, in order."""
+        (or overall_ms in all). A 'response pending' (7F sid 78) from the unit extends the wait by
+        pending_ms (the BDC polls its LIN bus before answering DA5F, which takes seconds) and is not
+        returned. Returns the DIAG frames addressed to the tester, in order."""
         if not self.connected:
             raise HsfzError("not connected")
         frame = Frame(TYPE_DIAG, TESTER, dst, payload)
@@ -150,6 +152,12 @@ class EnetClient:
                 if f.type == TYPE_REJECT:
                     raise HsfzError("the gateway rejected the request")
                 if f.type == TYPE_DIAG and f.dst == TESTER:
+                    p = f.payload
+                    if len(p) >= 3 and p[0] == 0x7F and p[2] == 0x78 and p[1] == payload[0]:
+                        deadline = max(deadline, time.monotonic() + pending_ms / 1000.0)
+                        first_deadline = deadline
+                        last_data = None
+                        continue
                     frames.append(f)
         return frames
 

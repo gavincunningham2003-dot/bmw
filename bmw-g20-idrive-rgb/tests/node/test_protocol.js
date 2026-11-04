@@ -43,25 +43,31 @@ test('SGBD index: known body controllers and unknown ones', () => {
     assert.strictEqual(u.sgbd, null); assert.strictEqual(u.rgbActuator, 'unknown');
     assert.strictEqual(P.decodeSgbdIndex([1]), null);
 });
-test('LIN 1 status: one location byte per NAD, FF and 00 are no slave', () => {
-    const s = P.decodeLin1Status([0x13, 0xFF, 0x05, 0x00, 0x4B]);
-    assert.deepStrictEqual(s.map((x) => [x.nad, x.locationId]), [[1, 0x13], [3, 0x05], [5, 0x4B]]);
-    assert.strictEqual(s[0].location, 'Contour line dashboard driver');
-    assert.strictEqual(s[2].location, 'Cupholder front');
-    assert.strictEqual(P.decodeLin1Status([0x99])[0].location, 'location 0x99');
-});
-test('LIN 2 status: 5 bytes per slave in the documented BLUE, GREEN, RED, brightness order', () => {
-    const s = P.decodeLin2Status([0x01, 10, 20, 30, 99, 0xFF, 0, 0, 0, 0, 0x03, 1, 2, 3, 4]);
-    assert.strictEqual(s.length, 2);
-    assert.deepStrictEqual([s[0].nad, s[0].b, s[0].g, s[0].r, s[0].brightness], [1, 10, 20, 30, 99]);
-    assert.strictEqual(s[1].nad, 3); assert.strictEqual(s[1].bus, 2);
+test('LIN status: the 10-byte records the car sent (bus 1, 7 passenger-side slaves showing the Violet preset)', () => {
+    const empty = [0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x03, 0x07, 0x07, 0x07, 0x07];
+    let data = [];
+    [0x0F, 0x0E, 0x0C, 0x12, 0x22, 0x10, 0x04].forEach((loc) => { data = data.concat([loc, 0xFE, 0x3C, 0x78, 0x64, 0, 0, 0, 0, 0]); });
+    for (let i = 0; i < 19; i++) data = data.concat(empty);
+    data.push(0x02);
+    const s = P.decodeLin1Status(data);
+    assert.strictEqual(s.length, 7);
+    assert.deepStrictEqual(s.map((x) => x.nad), [1, 2, 3, 4, 5, 6, 7]);
+    assert.strictEqual(s[0].location, 'Map pocket passenger door front');
+    assert.strictEqual(s[6].location, 'Footwell passenger rear');
+    assert.deepStrictEqual([s[0].r, s[0].g, s[0].b, s[0].brightness, s[0].white], [0x78, 0x3C, 0xFE, 100, 0]);
+    assert.deepStrictEqual(s[0].faults, { shortCircuit: 0, overTemp: 0, openLoad: 0, internal: 0 });
+    const s2 = P.decodeLin2Status(empty.concat([0x13, 1, 2, 3, 4, 5, 0, 0, 0, 0]));
+    assert.strictEqual(s2.length, 1); assert.strictEqual(s2[0].bus, 2); assert.strictEqual(s2[0].nad, 2); assert.strictEqual(s2[0].r, 3);
+    assert.strictEqual(P.decodeLin1Status([0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0])[0].location, 'location 0x99');
+    assert.strictEqual(P.decodeLin1Status([0x13, 1, 2]).length, 0, 'a partial record is not a slave');
 });
 test('PWM status, FASTA, SVK', () => {
     const pwm = P.decodePwmStatus([0, 64, 64, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert.strictEqual(pwm.length, 13); assert.strictEqual(pwm[1].name, 'INNENLICHT_LCI_0'); assert.strictEqual(pwm[1].pwm, 64);
-    const f = P.decodeFasta([0, 0, 0x10, 0, 0, 0, 0, 5, 0, 0, 0, 1, 0x13, 0xFF]);
-    assert.deepStrictEqual([f.bdcActiveSeconds, f.ambientOnSeconds, f.ambientReducedWhileDrivingSeconds], [0x1000, 5, 1]);
-    assert.strictEqual(f.slaves.length, 1);
+    const f = P.decodeFasta([0, 0, 0x10, 0, 1, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, 1, 0x13, 0xFF]);
+    assert.deepStrictEqual([f.bdcActiveSeconds, f.lightSwordFitted, f.lightSwordOnSeconds, f.ambientOnSeconds, f.ambientReducedWhileDrivingSeconds], [0x1000, 1, 7, 9, 1]);
+    assert.strictEqual(f.slaveLocations.length, 1);
+    assert.strictEqual(P.decodeFasta([1, 2, 3]), null);
     const svk = P.decodeSvk([6, 0, 0, 0x3F, 0x36, 0, 15, 2, 5, 0, 0, 0x51, 0xDD, 0, 17, 72]);
     assert.deepStrictEqual(svk, [{ type: 'BTLD', id: '00003F36', version: '000.015.002' }, { type: 'CAFD', id: '000051DD', version: '000.017.072' }]);
 });

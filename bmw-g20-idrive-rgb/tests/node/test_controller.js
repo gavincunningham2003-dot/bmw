@@ -229,6 +229,27 @@ test('shutdown releases the lights', async () => {
     await c.shutdown();
     assert.strictEqual(bdc.physical(1).source, 'oem');
 });
+test('the car layout: 7 + 12 slaves on two buses, each written on its own bus with its own DID', async () => {
+    const { G20_SLAVES } = require(path.join(JS, 'lighting_mock'));
+    const clock = fakeClock();
+    const bdc = new MockBdc({ now: clock.now, slaves: G20_SLAVES.bus1, slaves2: G20_SLAVES.bus2 });
+    const c = new MockLightingController({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, minGapMs: 0 });
+    await c.connect();
+    assert.strictEqual(c.slaves.length, 19);
+    assert.strictEqual(c.slaves.filter((s) => s.bus === 2).length, 12);
+    assert.strictEqual(c.slaves.find((s) => s.bus === 2 && s.nad === 3).location, 'Contour line dashboard driver');
+    c.setColour({ r: 255, g: 0, b: 0 });
+    await c.enableCustom();
+    const w = writes(c);
+    assert.strictEqual(w.length, 19);
+    assert.strictEqual(w.filter((x) => x.data[0] === 0xE3 && x.data[1] === 0xD1).length, 12, 'bus 2 slaves go to E3D1');
+    assert.strictEqual(w.filter((x) => x.data[0] === 0xDA && x.data[1] === 0x5E).length, 7, 'bus 1 slaves go to DA5E');
+    assert.strictEqual(bdc.physical(3, 2).source, 'custom', 'the dashboard driver line follows');
+    const st = await c.readState();
+    assert.strictEqual(st.slaves.filter((s) => s.r === 255 && s.g === 0).length, 19, 'E3D1 / DA5F read back the custom colour on every module');
+    await c.disableCustom();
+    assert.strictEqual(bdc.physical(3, 2).source, 'oem');
+});
 test('every write the mock controller sends passes the allow list', async () => {
     const { c } = make();
     await c.connect();

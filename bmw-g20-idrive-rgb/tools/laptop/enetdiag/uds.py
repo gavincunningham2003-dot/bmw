@@ -141,20 +141,27 @@ def decode_svk(data):
     return out
 
 
-def decode_lin1_status(data):
-    return [{"bus": 1, "nad": i + 1, "locationId": loc, "location": LOCATION.get(loc, "location 0x%02X" % loc)}
-            for i, loc in enumerate(data) if loc not in (0x00, 0xFF)]
+SLAVE_RECORD = 10   # RES_0xDA5F_D / RES_0xE3D1_D per NAD: Verbauort, blue, green, red, brightness, white, 4 fault flags (CONFIRMED on the car 2026-11-04)
 
 
-def decode_lin2_status(data):
+def decode_lin_status(data, bus):
     out = []
-    for i in range(0, len(data) - 4, 5):
+    for i in range(0, len(data) - (SLAVE_RECORD - 1), SLAVE_RECORD):
         loc = data[i]
         if loc in (0x00, 0xFF):
             continue
-        out.append({"bus": 2, "nad": i // 5 + 1, "locationId": loc, "location": LOCATION.get(loc, "location 0x%02X" % loc),
-                    "b": data[i + 1], "g": data[i + 2], "r": data[i + 3], "brightness": data[i + 4]})
+        out.append({"bus": bus, "nad": i // SLAVE_RECORD + 1, "locationId": loc, "location": LOCATION.get(loc, "location 0x%02X" % loc),
+                    "b": data[i + 1], "g": data[i + 2], "r": data[i + 3], "brightness": data[i + 4], "white": data[i + 5],
+                    "faults": {"shortCircuit": data[i + 6], "overTemp": data[i + 7], "openLoad": data[i + 8], "internal": data[i + 9]}})
     return out
+
+
+def decode_lin1_status(data):
+    return decode_lin_status(data, 1)
+
+
+def decode_lin2_status(data):
+    return decode_lin_status(data, 2)
 
 
 def decode_pwm(data):
@@ -162,10 +169,20 @@ def decode_pwm(data):
 
 
 def decode_fasta(data):
-    if len(data) < 12:
+    """RES_0x2300_D: u32 reference time, u8 light-sword fitted, u32 LS switched via HU, u32 via button, u32 LS duration,
+    u8 panorama-roof light fitted, u32 PaDa via HU, u32 ambient/PaDa duration, u32 reduced-while-driving, then one
+    location byte per slave (STAT_VERBAUORT_ID_SLAVE1..52)."""
+    if len(data) < 30:
         return None
-    a, b, c = struct.unpack(">III", data[:12])
-    return {"bdcActiveSeconds": a, "ambientOnSeconds": b, "ambientReducedWhileDrivingSeconds": c, "slaves": decode_lin1_status(data[12:])}
+    ref, ls_fitted, ls_hu, ls_btn, ls_dur, pada_fitted, pada_hu, amb_dur, reduced = struct.unpack(">IBIIIBIII", data[:30])
+    # on the car the record is ~290 bytes; the 52 slave locations (26 per bus, NAD order) are its LAST 52 bytes and the
+    # leading counters are TENTATIVE (more fields than the rows read so far name)
+    start = len(data) - 52 if len(data) > 30 + 52 else 30
+    locs = [{"index": i + 1, "bus": 1 if i < 26 else 2, "nad": i % 26 + 1, "locationId": loc, "location": LOCATION.get(loc, "location 0x%02X" % loc)}
+            for i, loc in enumerate(data[start:]) if loc not in (0x00, 0xFF)]
+    return {"bdcActiveSeconds": ref, "lightSwordFitted": ls_fitted, "lightSwordSwitchedViaHu": ls_hu, "lightSwordSwitchedViaButton": ls_btn,
+            "lightSwordOnSeconds": ls_dur, "panoramaRoofLightFitted": pada_fitted, "panoramaRoofSwitchedViaHu": pada_hu,
+            "ambientOnSeconds": amb_dur, "ambientReducedWhileDrivingSeconds": reduced, "leadingFieldsTentative": True, "slaveLocations": locs}
 
 
 def decode_mgu_ip(data):

@@ -83,6 +83,10 @@ def main(argv=None):
     r.add_argument("--port", type=int, default=6801)
     r.add_argument("--target", required=True, help="unit address in hex, e.g. 40")
     r.add_argument("--did", required=True, help="identifier in hex, e.g. DA5F")
+    li = sub.add_parser("lights", help="read only the BDC's interior-light identifiers (DA5F, E3D1, 4800, 2300, D5D3)")
+    li.add_argument("--gateway", required=True)
+    li.add_argument("--port", type=int, default=6801)
+    li.add_argument("--out", default="out")
     t = sub.add_parser("selftest", help="scan the built-in simulated car on 127.0.0.1")
     t.add_argument("--out", default="out")
     args = ap.parse_args(argv)
@@ -125,6 +129,37 @@ def main(argv=None):
                     print("  NAD %2d  %s  rgb %d %d %d  brightness %d" % (sl["nad"], sl["location"], sl["r"], sl["g"], sl["b"], sl["brightness"]))
             elif did == 0xF150:
                 print("  ", uds.decode_sgbd_index(data))
+        return 0
+
+    if args.cmd == "lights":
+        logger, logfile = setup_logging(args.out, stamp)
+        logger.info("enetdiag %s: BDC light identifiers, read-only (UDS 0x22 only)", __version__)
+        c = EnetClient(args.gateway, args.port)
+        try:
+            c.connect()
+        except OSError as e:
+            print("cannot connect: %s" % e)
+            return 1
+        try:
+            sc = Scanner(c)
+            res = sc.bdc_lighting()
+        finally:
+            c.close()
+        report = {"meta": {"tool": "enetdiag", "version": __version__, "readOnly": True}, "gateway": {"ip": args.gateway}, "bdc": {"lighting": res}, "exchanges": sc.exchanges}
+        path = write_report(report, args.out, stamp)
+        for name, e in res["reads"].items():
+            print("%-22s %s" % (name, e.get("result") + ("" if e.get("result") == "ok" else " " + str(e.get("nrcName") or ""))))
+            for sl in e.get("slaves") or []:
+                print("   bus %d NAD %2d  %-42s rgb %3d %3d %3d  bright %3d  white %3d  faults %s" % (sl["bus"], sl["nad"], sl["location"], sl["r"], sl["g"], sl["b"], sl["brightness"], sl["white"], "".join(str(v) for v in sl["faults"].values())))
+            if e.get("decoded"):
+                print("   " + json.dumps(e["decoded"])[:300])
+            if e.get("elements"):
+                print("   " + ", ".join("%s=%s" % (x["name"], x["pwm"]) for x in e["elements"]))
+        print("report: %s" % path)
+        print("log:    %s" % logfile)
+        for h in list(logger.handlers):
+            h.close()
+            logger.removeHandler(h)
         return 0
 
     if args.cmd in ("scan", "selftest"):
