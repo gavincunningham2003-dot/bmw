@@ -103,10 +103,23 @@ changes while driving* can relax this. The simulated link is exempt.
 ## 3. Input and rendering
 
 - Full-screen layout on the kit renderer (mgu-render/1 dialect with touch routing): the knob walks the
-  header tabs, the page's controls (targets) and the bar buttons; a press on a wheel or dial ENTERS it: the
-  app grabs the knob (`ctx.controller.grab`), turns adjust the draft, a press confirms (and applies, with the
-  setting on), a tilt left cancels, and the knob returns to the HMI. The hardware BACK is never intercepted.
-- Touch: taps on the wheel, the dial and the buttons (the kit routes taps, not drags, to the page).
+  header tabs, the page's controls (targets) and the bar buttons; a press on the ring's disc or a dial's centre
+  ENTERS it: the app grabs the knob (`ctx.controller.grab`), turns adjust the draft, a press confirms (and
+  applies, with the setting on), a tilt left (deflection 10/11) cancels, and the knob returns to the HMI. The
+  hardware BACK is never intercepted.
+- Touch: taps on the hue ring, the dial's arc and the buttons (the kit routes taps, not drags, to the page). A
+  tap on a kit target is a press without coordinates, so the knob's targets are only the centres of the ring
+  and the dials; the coloured surfaces stay free for `ctx.onTap`.
+- **One kit runtime change** (`scripts/kit_patch.js`, applied to the copy of `kit/runtime/display.js` at
+  staging, by `build_app.py` and by the emulator wrapper): where the kit runs the screen it handles every knob
+  event itself and never calls `ctx.controller.onInput`, even after `grab(true)`. The patch hands the events to
+  the app while it holds the grab, and back to the kit's focus on release. Nothing else changes.
+- **The cabin view** (`ui_widgets.js carView`): the 19 modules drawn where they sit (dashboard lines, door
+  lines, handles, pockets, footwells; right-hand drive) in the colours `lighting_scene.render` gives the draft,
+  so the picture is exactly what Apply would send.
+- **Live emulator on the laptop:** `npm run emu` runs the kit's emulator (`kit/tools/emu.js`: the car's draw
+  engine as WebAssembly, the real runtime, a stubbed head unit) on Windows too: the renderer socket becomes a
+  named pipe (`scripts/emu_win_shim.js` makes the runtime accept it) and the build runs with `python`.
 - Without the controller gate the knob cannot be grabbed: every control has - / + buttons the kit's focus
   ring reaches, so the app stays usable from the knob alone.
 - The wheel is 24 ramped arcs in a cached layer; the dial is three arcs (no pixel images: the Store renderer

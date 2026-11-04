@@ -104,7 +104,8 @@ measured link is fast enough). Brightness values other than 100 have not been sh
 - A cabin-wide frame is 19 writes, one at a time (266 ms at the 14 ms measured over ENET; the head unit's own latency is unmeasured). Animated modes are paced to that; Colour Wave needs a few frames a second.
 - The BDC's own PWM channels (`LCI_0` at 89 %, `MSA_LED` 92 %) are not RGB modules; `DA5E`/`E3D1` do
   not reach them. Whether any visible zone is on them is unknown (all the obvious zones are LIN modules).
-- The knob needs the controller gate; the wheel's taps need the touch-routing renderer.
+- The knob needs the controller gate; the ring's taps need the touch-routing renderer. The kit runtime carries one
+  patch (`scripts/kit_patch.js`) so the knob reaches the app while it grabs; worth offering upstream.
 - While custom control is on, the OEM "lighting off" and brightness are overridden for those modules.
 
 ## 6. Forum threads worth reading by hand (they refuse automated access)

@@ -45,6 +45,8 @@ see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md](NEXT_STEPS.
 npm test                       # stages the app with the kit runtime and runs the Node tests
 npm run test:py                # the Python tests (loopback simulated car included)
 npm run preview                # renders the pages to preview/*.png
+npm run emu                    # the kit's live emulator: the app drawn by the car's own draw engine at http://localhost:8077
+                               # (mouse = touch, mouse wheel or [ ] = the iDrive knob, Enter = press, arrows = tilt, Backspace = BACK)
 python scripts/build_app.py    # the kit's build -> dist/ambient_rgb@0.3.0.mgu (needs the real oap-sdk to be installable)
 cd tools/laptop && python -m enetdiag selftest
 ```
@@ -55,8 +57,10 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
 
 - **Preview, then apply.** Turning the knob or tapping the wheel changes only the screen; the car changes on
   Apply, or on the confirming press if you keep that setting on. Cancel and BACK discard.
-- **Colours:** a colour wheel, a circular brightness dial, saturation, a zone picker (all, dashboard, front
-  doors, rear doors, footwells, upper, lower), the BDC's library colours, saved colours.
+- **Colours:** the factory-style picker: a list of the ways to light the cabin on the left, the hue ring with the
+  chosen colour in its middle, a circular brightness dial and saturation, and the cabin from above on the right
+  with every module lit as it would be; a zone picker (all, dashboard, front doors, rear doors, footwells, upper,
+  lower), the BDC's library colours, saved colours.
 - **Dual Colour:** upper and lower lighting with their own colour and brightness, swap, copy, save, Apply both.
   The door-handle lights belong to whichever group you choose.
 - **Modes:** Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave, each with its settings; complete

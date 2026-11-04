@@ -23,11 +23,11 @@ test('every page draws with its controls as targets; the simulated link is up; n
 test('PREVIEW ONLY: taps on the wheel and the dial change the screen, not the car; Apply changes the car', async () => {
     const h = await harness({ sets: { backend: 'mock' } });
     await h.frame();
-    h.tap(258, 63);                                               // the top edge of the wheel (centre 258, 260; r 198): hue 0, full saturation
+    h.tap(640, 98);                                               // the top of the hue ring (centre 640, 250; 124..180): hue 0
     assert.ok(Math.abs(h.app.draft.colours.hsv.h) < 1e-6 || Math.abs(h.app.draft.colours.hsv.h - 360) < 1e-6);
-    assert.ok(h.app.draft.colours.hsv.s > 0.99);
+    assert.strictEqual(h.app.draft.colours.hsv.s, 0.76, 'the ring sets the hue only: saturation keeps its value');
     assert.strictEqual(h.app.dirty().colours, true);
-    h.tap(600, 250 - 118);                                        // top of the brightness ring = 50 % (the ring runs 210 -> 150 degrees)
+    h.tap(930, 180 - 64);                                         // top of the brightness dial = 50 % (the ring runs 210 -> 150 degrees)
     assert.strictEqual(h.app.draft.colours.brightness, 50);
     await h.frame();
     assert.strictEqual(h.app.ctl().scheduler.stats.writes, 0, 'NOTHING written by previewing');
@@ -38,7 +38,7 @@ test('PREVIEW ONLY: taps on the wheel and the dial change the screen, not the ca
     assert.strictEqual(ctl.program.mode, 'solid');
     assert.strictEqual(ctl.program.brightness, 50);
     const c1 = phys(h, '2:1');
-    assert.ok(c1[0] === 254 && c1[1] < 4 && c1[2] < 4, 'red: ' + c1);
+    assert.ok(c1[0] === 254 && c1[1] === c1[2] && c1[1] === 61, 'hue 0 at the draft saturation 0.76 = 254 61 61: ' + c1);
     assert.strictEqual(c1[3], 50);
     assert.strictEqual(h.app.dirty().colours, false);
     await ctl.shutdown();
@@ -68,7 +68,7 @@ test('the rotary flow: enter the wheel, turn, confirm applies (setting on); canc
     h.knob({ frontRotaryEncoderOperation: 110, frontRotaryEncoderPushButton: 0, frontRotaryEncoderDeflection: 0 });
     h.knob({ frontRotaryEncoderOperation: 100, frontRotaryEncoderPushButton: 0, frontRotaryEncoderDeflection: 0 });   // 10 clicks anticlockwise: dimmer
     assert.strictEqual(h.app.draft.colours.brightness, 80);
-    h.knob({ frontRotaryEncoderOperation: 100, frontRotaryEncoderPushButton: 0, frontRotaryEncoderDeflection: 4 });   // tilt left = cancel
+    h.knob({ frontRotaryEncoderOperation: 100, frontRotaryEncoderPushButton: 0, frontRotaryEncoderDeflection: 10 });  // tilt left (WEST_KURZ = 10) = cancel
     assert.strictEqual(h.app.draft.colours.brightness, 100);
     assert.strictEqual(ed.editing, null);
     assert.strictEqual(C.rgbToHex(h.app.ctl().program.colour), applied);
@@ -199,7 +199,7 @@ test('Cancel discards a draft and returns to the applied colour', async () => {
     await h.frame();
     await h.press('apply');
     await sleep(30);
-    h.tap(258, 63);                                               // red preview
+    h.tap(640, 98);                                               // red preview
     await h.frame();
     assert.ok(keys(h).indexOf('cancel') >= 0, 'cancel offered while dirty');
     await h.press('cancel');

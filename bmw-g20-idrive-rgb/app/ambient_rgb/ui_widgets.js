@@ -63,6 +63,92 @@ function ringHit(x, y, geom, slack) {
     return Math.round(a / RING_SWEEP * 100);
 }
 
+/**
+ * The hue ring (the BMW / Mercedes style picker): a donut of hues, 0 at 12 o'clock clockwise, a marker at the hue,
+ * the chosen colour as a disc in the middle. Returns its geometry { cx, cy, r (outer), ri (inner) }.
+ */
+function hueRing(cv, t, cx, cy, r, width, hsv, opts) {
+    const o = opts || {}, S = t.sel || t.accent, ri = r - width;
+    if (o.editing) cv.arc(cx, cy, r + 5, r + 10, 0, 360, withAlpha(S, 0.9));
+    else if (o.focused) cv.arc(cx, cy, r + 5, r + 9, 0, 360, withAlpha(S, 0.5));
+    cv.arc(cx, cy, r + 1, r + 5, 0, 360, withAlpha('#ffffff', 0.08));
+    const key = 'ambient_rgb:hue:' + r + ':' + width, sz = r * 2 + 4;
+    cv.blit(G.layer(key, sz, sz, (c) => {
+        const c0 = sz / 2;
+        for (let a = 0; a < 360; a += 10) {
+            const h0 = C.rgbToHex(C.hsvToRgb(a, 1, 1)), h1 = C.rgbToHex(C.hsvToRgb(a + 10, 1, 1));
+            c.arc(c0, c0, ri, r, a, a + 10.6, h0, { ramp: [h0, h1], rampFrom: a, rampTo: a + 10 });
+        }
+    }), cx - sz / 2, cy - sz / 2);
+    // the colour chosen, as the disc in the middle (what the cabin gets, at full brightness)
+    const col = C.hsvToRgb(hsv.h, hsv.s, 1), hex = C.rgbToHex(col);
+    cv.circle(cx, cy, ri - 12, hex);
+    cv.arc(cx, cy, ri - 14, ri - 11, 0, 360, withAlpha('#000000', 0.35));
+    if (o.text !== false) {
+        const dark = C.luma(col) > 0.55;
+        cv.text(hex, cx, cy + 12, Math.round(ri * 0.3), dark ? '#000000' : '#ffffff', { align: 'center', font: 'num' });
+        if (o.caption) cv.text(String(o.caption).toUpperCase(), cx, cy + ri * 0.5, 13, dark ? '#333333' : '#dddddd', { align: 'center', font: 'bold', spacing: 2 });
+    }
+    // the marker on the ring at the hue
+    const a = C.wrapHue(hsv.h) * Math.PI / 180, rm = ri + width / 2;
+    const mx = cx + Math.sin(a) * rm, my = cy - Math.cos(a) * rm;
+    cv.circle(mx, my, width * 0.42, '#000000');
+    cv.circle(mx, my, width * 0.34, '#ffffff');
+    cv.circle(mx, my, width * 0.22, C.rgbToHex(C.hsvToRgb(hsv.h, 1, 1)));
+    return { cx, cy, r, ri };
+}
+/** A tap on the hue ring: the hue 0..360 by angle, or null when off the ring (slack px inside / outside). */
+function hueRingHit(x, y, geom, slack) {
+    const dx = x - geom.cx, dy = y - geom.cy, d = Math.sqrt(dx * dx + dy * dy), s = slack == null ? 16 : slack;
+    if (d < geom.ri - s || d > geom.r + s) return null;
+    return C.wrapHue(Math.atan2(dx, -dy) * 180 / Math.PI);
+}
+
+/**
+ * The cabin from above (nose up, right-hand drive: the driver on the right), each ambient module drawn where it
+ * sits in the colour the scene gives it: scene = { 'bus:nad': { r, g, b, brightness } } (lighting_scene.render);
+ * a module not in the scene is drawn as OEM (dim). Returns the body rect.
+ */
+function carView(cv, t, x, y, w, h, slaves, scene, opts) {
+    const o = opts || {};
+    const S = require('./lighting_scene');
+    const bx = x + w * 0.16, bw = w * 0.68, by = y + h * 0.03, bh = h * 0.94;
+    // body, glass, cabin floor
+    cv.roundRect(bx, by, bw, bh, bw * 0.3, withAlpha('#ffffff', 0.10));
+    cv.strokeRoundRect(bx, by, bw, bh, bw * 0.3, 2, withAlpha('#ffffff', 0.22));
+    const cabY = by + bh * 0.27, cabH = bh * 0.52, cabX = bx + bw * 0.10, cabW = bw * 0.80;
+    cv.roundRect(cabX, by + bh * 0.17, cabW, bh * 0.10, 8, withAlpha('#000000', 0.35));          // windscreen
+    cv.roundRect(cabX, cabY, cabW, cabH, 10, withAlpha('#000000', 0.45));                          // cabin
+    cv.roundRect(cabX, cabY + cabH, cabW, bh * 0.07, 8, withAlpha('#000000', 0.3));               // rear window
+    // seats
+    [[0.22, 0.12], [0.58, 0.12], [0.22, 0.58], [0.58, 0.58]].forEach(([fx, fy]) => cv.roundRect(cabX + cabW * fx, cabY + cabH * fy, cabW * 0.2, cabH * 0.26, 6, withAlpha('#ffffff', 0.06)));
+    const oem = o.oemColour || withAlpha('#9fb4ff', 0.28);
+    const colourOf = (m) => { const s = scene && scene[S.key(m)]; if (!s) return { c: oem, on: false }; const k = Math.max(0.15, (s.brightness == null ? 100 : s.brightness) / 100); return { c: C.rgbToHex(C.rgb(s.r * k, s.g * k, s.b * k)), on: true }; };
+    const glow = (xa, ya, xb, yb, m) => {
+        const { c, on } = colourOf(m);
+        if (on) cv.line(xa, ya, xb, yb, 12, withAlpha(c, 0.28));
+        cv.line(xa, ya, xb, yb, on ? 5 : 3, c);
+    };
+    const dot = (px, py, r, m) => { const { c, on } = colourOf(m); if (on) cv.circle(px, py, r * 2.2, withAlpha(c, 0.22)); cv.circle(px, py, r, c); };
+    (slaves || []).forEach((m) => {
+        const cat = S.category(m), right = S.isDriverSide(m), rear = S.isRear(m);
+        const sideX = right ? cabX + cabW - 4 : cabX + 4, dir = right ? -1 : 1;
+        const y0 = rear ? cabY + cabH * 0.52 : cabY + cabH * 0.06, y1 = rear ? cabY + cabH * 0.94 : cabY + cabH * 0.46;
+        if (cat === 'dashLine' || cat === 'dashTrim') {
+            // three lines across the top of the cabin: passenger third, centre, driver third
+            const centre = m.locationId === 0x15 || m.locationId === 0x16;     // (the car: 0x13 driver, 0x15 centre, 0x17 passenger)
+            const third = cabW / 3, i = centre ? 1 : right ? 2 : 0;
+            glow(cabX + third * i + 6, cabY + 6, cabX + third * (i + 1) - 6, cabY + 6, m);
+        } else if (cat === 'doorLine' || cat === 'doorTrim') glow(sideX, y0, sideX, y1, m);
+        else if (cat === 'handle') dot(sideX + dir * 10, (y0 + y1) / 2, 4, m);
+        else if (cat === 'pocket') glow(sideX + dir * 6, y1 - cabH * 0.12, sideX + dir * 6, y1 - 4, m);
+        else if (cat === 'footwell') dot(cabX + cabW * (right ? 0.68 : 0.32), rear ? cabY + cabH * 0.56 : cabY + cabH * 0.1 + cabH * 0.04, 9, m);
+        else dot(sideX + dir * 14, (y0 + y1) / 2 + 14, 3, m);
+    });
+    if (o.label) cv.text(String(o.label).toUpperCase(), x + w / 2, by + bh + 20, 13, t.dim, { align: 'center', font: 'bold', spacing: 2 });
+    return { x: bx, y: by, w: bw, h: bh };
+}
+
 /** A big colour swatch with its hex and a caption; dark text on light colours. */
 function swatch(cv, t, x, y, w, h, colour, caption, opts) {
     const o = opts || {}, hex = C.rgbToHex(colour), dark = C.luma(colour) > 0.55;
@@ -106,8 +192,11 @@ class Editor {
     enter(key) {
         const c = this.controls.get(key);
         if (!c) return false;
-        if (this.editing && this.editing !== key) this.confirm();
+        if (this.editing === key) return true;            // already on it: keep the value entered with (for cancel)
+        if (this.editing) this.confirm();
         this.editing = key; this.entered = c.get();
+        // the press that entered may still be held when the first event reaches us: not a confirm
+        this._knob.pressed = true;
         this._grab(true);
         this.log.info('edit ' + key + ' = ' + JSON.stringify(this.entered));
         return true;
@@ -173,11 +262,12 @@ class Knob {
         if (p && !this.pressed) out.press = true;
         this.pressed = p;
         const df = v.frontRotaryEncoderDeflection;
-        const w = df === 4 || df === 8 || (typeof df === 'string' && /WEST/.test(df));
+        // deflection enums as the kit's display.js reads them: 1/2 N, 4/5 E, 7/8 S, 10/11 W (short / long push)
+        const w = df === 10 || df === 11 || (typeof df === 'string' && /WEST/.test(df));
         if (w && !this.tilt) out.tiltW = true;
         this.tilt = w ? 'W' : null;
         return out;
     }
 }
 
-module.exports = { wheel, ring, ringHit, swatch, stepper, Editor, Knob, RING_START, RING_SWEEP };
+module.exports = { wheel, ring, ringHit, hueRing, hueRingHit, carView, swatch, stepper, Editor, Knob, RING_START, RING_SWEEP };
