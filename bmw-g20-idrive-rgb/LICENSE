@@ -1,28 +1,82 @@
-MIT License
+Ambient RGB Personal Use Licence
+Version 1.0, 5 November 2026
 
-Copyright (c) 2026 the bmw-g20-idrive-rgb contributors
+Copyright (c) 2026 Gavin Cunningham ("the Licensor")
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This licence covers the software in this repository (the "Software"): the Ambient RGB
+iDrive application, its lighting controller, tools, tests and documentation, except the
+third-party components listed in section 7, which keep their own licences.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Personal use is free
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+   Anyone may use, copy, study, modify and run the Software free of charge for personal,
+   non-commercial purposes, including on vehicles they own or are permitted to work on,
+   and may share unmodified or modified copies with other people for their personal,
+   non-commercial use, under this same licence.
 
-Third-party material and licences:
-- The MGU App Kit runtime (research/cauliflowermossgrape_idrive7-apps/kit/runtime) is used at build and
-  test time, not copied into this repository: MIT (its renderer parts GPL-3.0-or-later, see that repo).
-- tools/laptop/enetdiag/hsfz.py is adapted from cauliflowermossgrape/idrive7-8-ssh-root (The Unlicense).
-- The BDC identifier tables are facts from the public EdiabasX SGBD reference (emdzej.github.io/ediabasx-docs-sgbd).
-- The OEM library colours are the community-published values (Dauxdu/bmw-coding, MIT).
+2. Commercial use needs a commercial licence
+
+   Any commercial use of the Software, or of a work derived from it, requires a written
+   commercial licence from the Licensor and the payment of a fee agreed with the Licensor.
+   Commercial use includes, without limitation:
+
+   a. charging money or other consideration to install, configure, support or supply the
+      Software or a derived work on a vehicle;
+   b. selling, renting, licensing or bundling the Software or a derived work, alone or as
+      part of a product or service;
+   c. advertising, marketing or promoting any product, service or business using the
+      Software or a derived work, or using it to demonstrate such products or services;
+   d. using the Software or a derived work in the course of a business in any other way
+      that produces revenue or other commercial advantage.
+
+   Anyone intending such use must contact the Licensor BEFORE the use begins, through the
+   repository at https://github.com/gavincunningham2003-dot/bmw or by any contact address
+   published there, and may proceed only once a commercial licence has been agreed. Commercial
+   use without an agreed licence is outside the scope of this licence, infringes the
+   Licensor's copyright, and makes the user liable for that infringement, including for the
+   fee that would have been payable and any damages and costs.
+
+3. Changes must be shared
+
+   Anyone who distributes a modified version of the Software, or supplies it to others in any
+   form including as an installed service, must make the complete source code of their
+   modifications available under this same licence, with the changes clearly marked and
+   dated, at no charge beyond the cost of delivery. This applies to personal and commercial
+   use alike; a commercial licence does not remove it unless it says so in writing.
+
+4. Attribution
+
+   Every copy of the Software and every derived work must keep this licence text and the
+   copyright notice above, and must state that it is based on Ambient RGB by the Licensor
+   with a link to the repository.
+
+5. No warranty, use at your own risk
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+   PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM,
+   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE. The Software sends diagnostic
+   commands to a vehicle's control units. The user alone is responsible for the vehicle,
+   its warranty, its coding and its safe use.
+
+6. Not affiliated
+
+   The Software is not affiliated with, endorsed by or supported by BMW AG or any of its
+   subsidiaries. BMW, iDrive and related marks belong to their owners.
+
+7. Third-party components
+
+   The MGU App Kit (https://github.com/cauliflowermossgrape/idrive7-apps) is used under the
+   MIT Licence of its authors, whose copyright notice must be kept. BMW's application SDK is
+   not part of the Software and is never distributed with it; each user extracts it from their
+   own head unit. Every other third-party file keeps the licence stated in it.
+
+8. Termination
+
+   This licence ends automatically for anyone who breaches it. Rights already granted to
+   others under section 1 are unaffected.
+
+9. Governing law
+
+   This licence is governed by the laws of Ireland.

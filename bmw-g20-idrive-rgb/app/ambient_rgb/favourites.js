@@ -22,21 +22,27 @@ class Favourites {
         this.log = log || { warn() {} };
         this.items = [];
         this.configs = [];               // complete configurations: { name, program, saved }
+        this.last = null;                // the last configuration applied (for "apply at start"), cleared by Restore OEM
         this.load();
     }
     load() {
-        this.items = []; this.configs = [];
+        this.items = []; this.configs = []; this.last = null;
         if (!this.file) return;
         try {
             const j = JSON.parse(fs.readFileSync(this.file, 'utf8'));
             if (Array.isArray(j.items)) this.items = j.items.filter((i) => i && hexToRgb(i.hex)).map((i) => ({ name: String(i.name || i.hex).slice(0, 24), hex: rgbToHex(hexToRgb(i.hex)) })).slice(0, MAX);
             if (Array.isArray(j.presets)) this.configs = j.presets.filter((p) => p && p.program).map((p) => S.presetFrom(p.name, p.program)).slice(0, MAX);
+            if (j.last && j.last.program && j.last.program.mode) this.last = { program: S.normalise(j.last.program), at: Number(j.last.at) || 0 };
         } catch (e) { /* none yet */ }
     }
     save() {
         if (!this.file) return;
-        try { fs.writeFileSync(this.file, JSON.stringify({ items: this.items, presets: this.configs.map((p) => ({ name: p.name, program: p.program, saved: p.saved })) }, null, 1)); } catch (e) { this.log.warn('favourites: ' + e); }
+        try { fs.writeFileSync(this.file, JSON.stringify({ items: this.items, presets: this.configs.map((p) => ({ name: p.name, program: p.program, saved: p.saved })), last: this.last }, null, 1)); } catch (e) { this.log.warn('favourites: ' + e); }
     }
+    /** The last configuration applied, or null (Restore OEM clears it): { program, at }. */
+    lastApplied() { return this.last ? { program: JSON.parse(JSON.stringify(this.last.program)), at: this.last.at } : null; }
+    setLast(program) { this.last = { program: S.normalise(program), at: Date.now() }; this.save(); }
+    clearLast() { if (!this.last) return; this.last = null; this.save(); }
     /** Complete configurations (colours, brightness, zones, mode, animation settings). */
     presets() { return this.configs.slice(); }
     addPreset(name, program) {

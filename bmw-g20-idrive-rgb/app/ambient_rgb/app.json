@@ -119,6 +119,22 @@
       ]
     },
     {
+      "key": "autoApply",
+      "label": "Apply the last lighting at start",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "No: the car starts with its factory lighting"
+        ],
+        [
+          "on",
+          "Yes: the last applied lighting comes back when the app starts (parked, link ready)"
+        ]
+      ]
+    },
+    {
       "key": "handles",
       "label": "Door handle lights belong to",
       "type": "choice",

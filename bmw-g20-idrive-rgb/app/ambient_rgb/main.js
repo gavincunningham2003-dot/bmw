@@ -85,6 +85,32 @@ mgu.run({
         await makeController();
         try { parked = require('./kit/parked').watch(ctx, log); } catch (e) { log.warn('parked: ' + e); }
 
+        /* ---------- apply the last lighting at start (setting, off by default) ----------
+         * The last configuration Apply sent is kept (favourites.json "last"); Restore OEM clears it. With the setting on,
+         * it is applied once the link is up, retrying for a while when the parking state is not yet known (the speed
+         * signal arrives a moment after start) and giving up quietly on any other refusal. */
+        let autoApplyTimer = null;
+        function autoApplyAtStart() {
+            const last = favs.lastApplied();
+            if (settings.get('autoApply') !== 'on' || !last) return;
+            let tries = 0;
+            const attempt = async () => {
+                autoApplyTimer = null;
+                if (ctl.program || busy) return;                   // the user got there first
+                if (ctl.state !== 'connected') { if (++tries < 20) autoApplyTimer = setTimeout(attempt, 1500); return; }
+                const can = ctl.canControl();
+                if (!can.ok && /parking state unknown/.test(can.reason || '') && ++tries < 20) { autoApplyTimer = setTimeout(attempt, 1500); return; }
+                if (!can.ok) { log.info('apply at start skipped: ' + can.reason); return; }
+                busy = true;
+                try {
+                    const r = await ctl.apply(last.program);
+                    if (r.ok) say('Last lighting applied: ' + S.describe(last.program, ctl.slaves), 3000); else log.info('apply at start refused: ' + (r.reason || 'refused'));
+                } finally { busy = false; }
+            };
+            autoApplyTimer = setTimeout(attempt, 50);
+        }
+        autoApplyAtStart();
+
         /* ---------- programs from drafts ---------- */
         const zoneName = () => ZONE_ORDER[draft.colours.zone];
         function coloursProgram() {
@@ -113,7 +139,7 @@ mgu.run({
             busy = true;
             try {
                 const r = await ctl.apply(program);
-                if (r.ok) { say((what || 'Applied') + (r.failed ? ' (' + r.failed + ' module(s) refused)' : '') + (ctl.kind === 'bdc-uds' && !ctl.armed ? ' [dry run]' : '')); dirty = { colours: false, dual: false, modes: false }; }
+                if (r.ok) { say((what || 'Applied') + (r.failed ? ' (' + r.failed + ' module(s) refused)' : '') + (ctl.kind === 'bdc-uds' && !ctl.armed ? ' [dry run]' : '')); dirty = { colours: false, dual: false, modes: false }; favs.setLast(program); }
                 else say('Not applied: ' + (r.reason || 'refused'), 4500);
             } finally { busy = false; }
         }
@@ -124,6 +150,7 @@ mgu.run({
             try {
                 const r = await ctl.restoreOem();
                 say(r.ok ? 'OEM lighting restored' : 'Restore incomplete: ' + r.reason, r.ok ? 2500 : 6000);
+                favs.clearLast();                                   // Restore OEM is the off switch: nothing comes back at the next start
             } finally { busy = false; }
         }
         function cancelPage() {
@@ -167,7 +194,7 @@ mgu.run({
         ctx.ui.onClick('BTN_APPLY', () => { if (page <= 2) applyPage(); else say('Nothing to apply on this page', 1500); });
         ctx.ui.onClick('BTN_OEM', restoreOem);
         ctx.ui.onClick('BTN_PAGE', () => { editor.cancel(); page = (page + 1) % PAGES.length; deleteMode = false; });
-        if (ctx.app && ctx.app.on) ctx.app.on('shutdown', () => { ctl.shutdown(); });
+        if (ctx.app && ctx.app.on) ctx.app.on('shutdown', () => { if (autoApplyTimer) clearTimeout(autoApplyTimer); ctl.shutdown(); });
         ctx.__ambient = { ctl: () => ctl, draft, editor, favs, page: () => page, setPage: (i) => { page = i; }, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
 
         /* ---------- drawing helpers ---------- */

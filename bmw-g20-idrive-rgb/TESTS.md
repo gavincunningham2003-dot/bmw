@@ -9,7 +9,7 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Node (87 tests, all passing)
+## Node (88 tests, all passing)
 
 | File | Covers |
 |---|---|
@@ -20,7 +20,7 @@ npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a 
 | `test_controller.js` (17) | on the simulated BDC with fake timers: probe; **nothing written before apply**; solid writes all 19 once then only keep-alives at the right times, never lapsing; dual on the right modules with the handle setting (and the release of the handles when set to off); zones keeping other zones; **restore releases every module and reports exactly** (a refused release is reported, a dead transport is reported); **apply / restore never interleave**, a second apply supersedes; **parking fail-closed** (unknown and moving both refused, nothing written); animated programs tick, pace to the transport, skip unchanged and force stale; breathing then a static apply stops the ticker; busy absorbed, lost link stops control and reconnects on availability without re-applying; every module refusing turns control off; status; every byte allowed and never 0xFF |
 | `test_bdc_uds.js` (12) | the real `kit/diag.js` on a faked TASU bus: probe reads; **disarmed = dry runs only**; armed bytes; ZEIT cap; unknown variant refused; no modules refused; `10 03` retry; transport away / back; lost mid-animation; timeout; the gate against forged services; every byte of a session allowed |
 | `test_favourites.js` (5) | colours and complete configurations (replace by name, persist, remove) |
-| `test_ui.js` (11) | `main.js` through the harness: every page draws; **preview only** (taps on the hue ring and the dial change the draft, zero writes, Apply writes); **the rotary flow** (enter the ring, 10 clicks = 30°, press confirms and applies, enter the dial, turn, tilt left cancels back to the entered value with the car unchanged); the setting off (only Apply applies); Dual (taps, swap, copy, Apply both drives upper and lower differently, handle follows the lower group, save combination); Modes (Rainbow with its speed, Start, Breathing, Restore stops cleanly); zones from the Colours page keep other zones; Favourites (colours and configurations, apply, delete); Cancel discards; Diagnostics; switching the link to the car without a transport refuses Apply |
+| `test_ui.js` (12) | `main.js` through the harness: every page draws; **preview only** (taps on the hue ring and the dial change the draft, zero writes, Apply writes); **the rotary flow** (enter the ring, 10 clicks = 30°, press confirms and applies, enter the dial, turn, tilt left cancels back to the entered value with the car unchanged); the setting off (only Apply applies); Dual (taps, swap, copy, Apply both drives upper and lower differently, handle follows the lower group, save combination); Modes (Rainbow with its speed, Start, Breathing, Restore stops cleanly); zones from the Colours page keep other zones; Favourites (colours and configurations, apply, delete); Cancel discards; Diagnostics; switching the link to the car without a transport refuses Apply; **apply at start** (off by default, the last applied lighting comes back with the setting on, Restore OEM clears it) |
 
 ## Python (24 tests, all passing)
 
@@ -30,7 +30,7 @@ redaction, scans against the loopback simulated car (pending, busy, two buses), 
 ## Results (last run on the development laptop, 2026-11-05)
 
 ```
-TOTAL: 87 passed, 0 failed            (node tests/node/run_all.js)
+TOTAL: 88 passed, 0 failed            (node tests/node/run_all.js)
 Ran 24 tests ... OK                   (python -m unittest discover -s tests/python)
 ```
 

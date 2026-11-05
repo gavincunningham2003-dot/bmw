@@ -31,7 +31,7 @@ see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md](NEXT_STEPS.
 |---|---|
 | `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `main.js` (five pages: Colours, Dual, Modes, Favourites, Diagnostics), `ui_widgets.js` (colour wheel, circular brightness dial, the rotary editor), `lighting_scene.js` (per-module scene, groups, zones, modes, presets), `lighting_scheduler.js` (the write queue), `lighting_controller.js` (apply / keep-alive / restore), `lighting_mock.js` (simulated BDC, 19 modules, fault injection), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_protocol.js` (the bytes, verified), `colour.js`, `favourites.js` |
 | `tools/laptop/` | `enetdiag`: the read-only Windows ENET discovery utility (UDS 0x22 only), `write_test.py` (the gated one-frame-per-step write test, with a colour cycle and fades), `catalog_search.py` for the MGU's SOME/IP catalog |
-| `tests/` | 87 Node tests (colour, protocol, scene, scheduler with a throughput benchmark, controller, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
+| `tests/` | 88 Node tests (colour, protocol, scene, scheduler with a throughput benchmark, controller, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
 | `scripts/` | `stage.js` (lay the app out with the kit runtime for tests), `preview_frames.js` (PNG screenshots), `build_app.py` (the kit's real build) |
 | `docs/screens/` | screenshots rendered by the kit's own drawing code |
 | `RESEARCH.md` | every repository investigated, with commit SHAs, useful files and verdicts |
@@ -68,6 +68,9 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
 - **Rotary first:** every control is reachable and adjustable with the iDrive knob; touch works where the
   renderer routes it; - / + buttons remain for a unit without the controller gate.
 - **Honest restore:** Restore OEM releases every driven module and reports exactly what was accepted.
+- **Back every drive (setting, off by default):** *Apply the last lighting at start* brings back the last
+  configuration Apply sent when the app starts, once the link is up and the car is known to be parked.
+  Restore OEM is the off switch: after it, the car starts with its factory lighting.
 
 ## Safety, in short
 
@@ -80,3 +83,10 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
   OEM lighting by itself. Restore OEM writes the modules inactive and stops.
 - Nothing is coded, flashed or persisted in the car. The laptop tool only reads.
 - Not affiliated with BMW. Your car, your risk. Read ROLLBACK.md before anything touches the car.
+
+## Licence
+
+Free for personal use; commercial use (charging to install it, selling or bundling it, advertising with
+it) needs a commercial licence agreed with the author first, and anyone distributing a modified version
+must publish their changes under the same terms. The full text is in [LICENSE](LICENSE). The MGU App Kit
+this builds on keeps its own MIT licence; BMW's SDK is never distributed.

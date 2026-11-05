@@ -233,4 +233,36 @@ test('switching the link to the car without a diagnostic link: no link, Apply re
     await ctl.shutdown();
 });
 
+
+test('APPLY AT START: with the setting on, the last applied lighting comes back; Restore OEM clears it; off by default', async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ambient-rgb-last-'));
+    // a first session applies green
+    let h = await harness({ dataDir, sets: { backend: 'mock' } });
+    await h.frame();
+    await h.press('oem:#10FE32');
+    await h.press('apply');
+    await sleep(30);
+    assert.strictEqual(h.app.ctl().program.mode, 'solid');
+    assert.ok(h.app.favs.lastApplied() && h.app.favs.lastApplied().program.mode === 'solid', 'the last applied program is kept');
+    // a new start with the setting off (the default): factory lighting
+    h = await harness({ dataDir, sets: { backend: 'mock' } });
+    await sleep(120);
+    assert.strictEqual(h.app.ctl().program, null, 'off by default: nothing applied at start');
+    // a new start with the setting on: the green comes back, written to the (simulated) car
+    h = await harness({ dataDir, sets: { backend: 'mock', autoApply: 'on' } });
+    await sleep(200);
+    assert.ok(h.app.ctl().program && h.app.ctl().program.mode === 'solid', 'applied at start');
+    assert.strictEqual(C.rgbToHex(h.app.ctl().program.colour), '#10FE32');
+    assert.ok(h.app.ctl().scheduler.stats.writes >= 19, 'written at start');
+    // Restore OEM is the off switch: the next start stays factory
+    await h.frame();
+    await h.press('oem');
+    await sleep(60);
+    assert.strictEqual(h.app.favs.lastApplied(), null);
+    h = await harness({ dataDir, sets: { backend: 'mock', autoApply: 'on' } });
+    await sleep(150);
+    assert.strictEqual(h.app.ctl().program, null, 'nothing comes back after Restore OEM');
+});
+
 module.exports = run('ui');
