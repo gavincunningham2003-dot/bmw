@@ -14,7 +14,7 @@ test('every page draws with its controls as targets; the simulated link is up; n
     const h = await harness({ sets: { backend: 'mock' } });
     for (const p of Object.values(PAGE)) { h.tab(p); const cv = await h.frame(); assert.ok(cv.words().length > 100, 'page ' + p); }
     h.tab(0); await h.frame();
-    ['wheel', 'ring', 'sat', 'zone', 'apply', 'oem:#783CFE'].forEach((k) => assert.ok(keys(h).indexOf(k) >= 0, k + ' in ' + keys(h)));
+    ['wheel', 'ring', 'zone', 'apply', 'oem:#783CFE'].forEach((k) => assert.ok(keys(h).indexOf(k) >= 0, k + ' in ' + keys(h)));
     assert.strictEqual(h.app.ctl().program, null);
     assert.strictEqual(h.app.ctl().scheduler.stats.writes, 0);
     assert.ok(h.png().length > 5000);
@@ -25,9 +25,9 @@ test('PREVIEW ONLY: taps on the wheel and the dial change the screen, not the ca
     await h.frame();
     h.tap(640, 98);                                               // the top of the hue ring (centre 640, 250; 124..180): hue 0
     assert.ok(Math.abs(h.app.draft.colours.hsv.h) < 1e-6 || Math.abs(h.app.draft.colours.hsv.h - 360) < 1e-6);
-    assert.strictEqual(h.app.draft.colours.hsv.s, 0.76, 'the ring sets the hue only: saturation keeps its value');
+    assert.strictEqual(h.app.draft.colours.hsv.s, 1, 'the ring picks pure hues: saturation is always 1');
     assert.strictEqual(h.app.dirty().colours, true);
-    h.tap(930, 180 - 64);                                         // top of the brightness dial = 50 % (the ring runs 210 -> 150 degrees)
+    h.tap(930, 220 - 64);                                         // top of the brightness dial (centre 930, 220) = 50 % (the ring runs 210 -> 150 degrees)
     assert.strictEqual(h.app.draft.colours.brightness, 50);
     await h.frame();
     assert.strictEqual(h.app.ctl().scheduler.stats.writes, 0, 'NOTHING written by previewing');
@@ -38,7 +38,7 @@ test('PREVIEW ONLY: taps on the wheel and the dial change the screen, not the ca
     assert.strictEqual(ctl.program.mode, 'solid');
     assert.strictEqual(ctl.program.brightness, 50);
     const c1 = phys(h, '2:1');
-    assert.ok(c1[0] === 254 && c1[1] === c1[2] && c1[1] === 61, 'hue 0 at the draft saturation 0.76 = 254 61 61: ' + c1);
+    assert.ok(c1[0] === 254 && c1[1] < 4 && c1[2] < 4, 'red: ' + c1);
     assert.strictEqual(c1[3], 50);
     assert.strictEqual(h.app.dirty().colours, false);
     await ctl.shutdown();
@@ -91,8 +91,8 @@ test('Dual Colour: two drafts, swap and copy, Apply both drives upper and lower 
     const h = await harness({ sets: { backend: 'mock', handles: 'bottom' } });
     h.tab(PAGE.dual); await h.frame();
     const d = h.app.draft.dual;
-    h.tap(200, 113);                                              // top wheel (centre 200, 262; r 150): its top edge = hue 0, red
-    h.tap(740, 113);                                              // bottom wheel: hue 0 too
+    h.tap(210, 155);                                              // upper hue ring (centre 210, 282; band 104..150): its top = hue 0, red
+    h.tap(750, 155);                                              // lower hue ring: hue 0 too
     d.bottom.hsv = { h: 200, s: 0.65, v: 1 };
     assert.strictEqual(h.app.ctl().program, null, 'preview only');
     await h.frame();

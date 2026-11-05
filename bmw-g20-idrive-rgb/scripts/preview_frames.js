@@ -19,7 +19,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const h = await harness({ sets: { backend: 'mock', demo: 'off' } });
     const shot = async (name) => { await h.frame(); const f = path.join(out, name + '.png'); h.png(f); console.log('frame', f, 'targets', h.targets().length); };
     await shot('01-colours');
-    h.tap(640, 98); h.tap(930, 116);                       // red, 50 %
+    h.tap(640, 98); h.tap(930, 156);                       // red, 50 %
     await shot('02-colours-preview');
     await h.press('wheel');                                 // editing with the knob
     await shot('03-colours-editing');

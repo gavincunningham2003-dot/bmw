@@ -49,8 +49,9 @@ mgu.run({
 
         /* ---------- drafts (previews): one per page, never sent anywhere by themselves ---------- */
         const draft = {
-            colours: { hsv: { h: 262, s: 0.76, v: 1 }, brightness: 100, zone: 0 },                       // zone: index into ZONE_ORDER
-            dual: { top: { hsv: { h: 270, s: 0.76, v: 1 }, brightness: 80 }, bottom: { hsv: { h: 200, s: 0.65, v: 1 }, brightness: 45 }, focus: 'top' },
+            // (saturation is always 1: the ring picks pure hues; only the BDC's library colours carry their own)
+            colours: { hsv: { h: 262, s: 1, v: 1 }, brightness: 100, zone: 0 },                          // zone: index into ZONE_ORDER
+            dual: { top: { hsv: { h: 270, s: 1, v: 1 }, brightness: 80 }, bottom: { hsv: { h: 200, s: 1, v: 1 }, brightness: 45 }, focus: 'top' },
             modes: { mode: 0, params: clone(S.DEFAULTS) },                                                 // mode: index into MODE_ORDER
         };
         let dirty = { colours: false, dual: false, modes: false };
@@ -152,12 +153,12 @@ mgu.run({
         ctx.onTap((x, y) => {
             const g = geometry;
             if (page === 0) {
-                if (g.hue) { const h = W.hueRingHit(x, y, g.hue); if (h != null) { draft.colours.hsv.h = h; markDirty('colours'); return; } }
+                if (g.hue) { const h = W.hueRingHit(x, y, g.hue); if (h != null) { draft.colours.hsv = { h, s: 1, v: 1 }; markDirty('colours'); return; } }
                 if (g.ring) { const v = W.ringHit(x, y, g.ring); if (v != null) { draft.colours.brightness = v; markDirty('colours'); } }
             } else if (page === 1) {
                 for (const side of ['top', 'bottom']) {
-                    const w = g['wheel_' + side], r = g['ring_' + side];
-                    if (w) { const hit = C.wheelHit(x, y, w.cx, w.cy, w.r, { slack: 10 }); if (hit) { draft.dual[side].hsv = { h: hit.h, s: hit.s, v: draft.dual[side].hsv.v }; draft.dual.focus = side; markDirty('dual'); return; } }
+                    const hr = g['hue_' + side], r = g['ring_' + side];
+                    if (hr) { const h = W.hueRingHit(x, y, hr); if (h != null) { draft.dual[side].hsv = { h, s: 1, v: 1 }; draft.dual.focus = side; markDirty('dual'); return; } }
                     if (r) { const v = W.ringHit(x, y, r, 20); if (v != null) { draft.dual[side].brightness = v; draft.dual.focus = side; markDirty('dual'); return; } }
                 }
             }
@@ -188,7 +189,7 @@ mgu.run({
             ax += G.button(cv, t, ax, y, 0, h, 'Restore OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program }) + 10;
             return ax;
         };
-        const wheelControl = (key, get, set) => editor.control({ key, get, set, step: 3, wrap: 360 });
+        const wheelControl = (key, get, set) => editor.control({ key, get, set: (h) => set(h), step: 3, wrap: 360 });
         const ringControl = (key, get, set) => editor.control({ key, get, set, step: 2, min: 0, max: 100 });
         const enter = (key) => () => { if (!editor.enter(key)) return; if (!editor.available) say('Turn the knob: no controller gate, use + / -', 2000); };
 
@@ -197,9 +198,8 @@ mgu.run({
         function drawColours(cv, t) {
             editor.reset();
             const d = draft.colours, c = rgbOf(d.hsv), hex = C.rgbToHex(c);
-            wheelControl('wheel', () => d.hsv.h, (h) => { d.hsv.h = h; });
+            wheelControl('wheel', () => d.hsv.h, (h) => { d.hsv = { h, s: 1, v: 1 }; });
             ringControl('ring', () => d.brightness, (v) => { d.brightness = v; });
-            editor.control({ key: 'sat', get: () => Math.round(d.hsv.s * 100), set: (v) => { d.hsv.s = v / 100; }, step: 5, min: 0, max: 100 });
             // the list on the left: this page, the other ways of lighting the cabin
             G.panel(cv, t, 20, 60, 400, 452, 'Colour');
             const rows = [
@@ -222,13 +222,11 @@ mgu.run({
             geometry.hue = W.hueRing(cv, t, HUE.cx, HUE.cy, HUE.r, HUE.w, d.hsv, { editing: editor.isEditing('wheel'), caption: dirty.colours ? 'preview' : ctl.program ? 'applied' : 'not applied' });
             cv.target(HUE.cx - 75, HUE.cy - 75, 150, 150, enter('wheel'), 'wheel');
             cv.text('HUE ' + Math.round(d.hsv.h) + '°   ·   RGB ' + c.r + ' ' + c.g + ' ' + c.b, HUE.cx, HUE.cy + HUE.r + 24, 15, t.dim, { align: 'center', font: 'num' });
-            // the brightness dial and saturation
-            geometry.ring = W.ring(cv, t, DIAL.cx, DIAL.cy, DIAL.r, d.brightness, 'Brightness', { editing: editor.isEditing('ring'), colour: hex, ramp: true, width: 14, size: 32 });
-            cv.target(DIAL.cx - 50, DIAL.cy - 50, 100, 100, enter('ring'), 'ring');
-            G.button(cv, t, DIAL.cx - 56, DIAL.cy + 82, 46, 36, '-', () => { d.brightness = Math.max(0, d.brightness - 5); markDirty('colours'); }, { key: 'ring-' });
-            G.button(cv, t, DIAL.cx + 10, DIAL.cy + 82, 46, 36, '+', () => { d.brightness = Math.min(100, d.brightness + 5); markDirty('colours'); }, { key: 'ring+' });
-            W.stepper(cv, t, DIAL.cx - 55, 346, 110, 'Saturation', Math.round(d.hsv.s * 100) + '%', () => { d.hsv.s = Math.max(0, d.hsv.s - 0.05); markDirty('colours'); }, () => { d.hsv.s = Math.min(1, d.hsv.s + 0.05); markDirty('colours'); }, 'sat', { editing: editor.isEditing('sat') });
-            cv.target(DIAL.cx - 55, 346, 110, 46, enter('sat'), 'sat');
+            // the brightness dial
+            geometry.ring = W.ring(cv, t, DIAL.cx, DIAL.cy + 40, DIAL.r, d.brightness, 'Brightness', { editing: editor.isEditing('ring'), colour: hex, ramp: true, width: 14, size: 32 });
+            cv.target(DIAL.cx - 50, DIAL.cy + 40 - 50, 100, 100, enter('ring'), 'ring');
+            G.button(cv, t, DIAL.cx - 56, DIAL.cy + 122, 46, 36, '-', () => { d.brightness = Math.max(0, d.brightness - 5); markDirty('colours'); }, { key: 'ring-' });
+            G.button(cv, t, DIAL.cx + 10, DIAL.cy + 122, 46, 36, '+', () => { d.brightness = Math.min(100, d.brightness + 5); markDirty('colours'); }, { key: 'ring+' });
             // actions under the ring
             const ax = applyRow(cv, t, 460, 462, 44, 'Apply', dirty.colours);
             G.button(cv, t, ax, 462, 0, 44, favs.has(hex) ? 'Saved' : 'Save colour', () => { if (favs.add(hex)) say('Saved ' + hex); }, { key: 'save', busy: favs.has(hex) });
@@ -236,7 +234,11 @@ mgu.run({
             G.button(cv, t, 1100, 64, 460, 44, 'Applies to: ' + S.zoneLabel(zoneName(), ctl.slaves) + '  ›', () => { d.zone = (d.zone + 1) % ZONE_ORDER.length; markDirty('colours'); }, { key: 'zone' });
             let scene = null;
             try { scene = S.render(coloursProgram(), ctl.slaves, Date.now()); } catch (e) { scene = null; }
-            W.carView(cv, t, 1150, 116, 360, 316, ctl.slaves, scene, { label: dirty.colours ? 'preview (not applied)' : ctl.program ? 'as applied' : 'factory lighting' });
+            W.carView(cv, t, 1080, 110, 500, 346, ctl.slaves, scene, {
+                heading: 'front · right-hand drive',
+                legend: [{ colour: hex, text: S.zoneLabel(zoneName(), ctl.slaves) + ' · solid' }],
+                status: (ctl.kind === 'mock' ? 'simulated · ' : '') + (dirty.colours ? 'preview' : ctl.program ? 'applied' : 'factory'), statusColour: dirty.colours ? t.warn : ctl.program ? t.ok : t.dim,
+            });
             // the BDC's library colours
             let cx = 1100;
             favs.oem().forEach((f) => {
@@ -253,39 +255,45 @@ mgu.run({
         function drawDual(cv, t) {
             editor.reset();
             const d = draft.dual;
+            // two pickers as on the Colours page: the hue ring with the colour in its middle, the brightness dial beside it
             ['top', 'bottom'].forEach((side, i) => {
                 const x0 = 40 + i * 540, s = d[side], col = rgbOf(s.hsv), hex = C.rgbToHex(col);
-                wheelControl('wheel_' + side, () => s.hsv.h, (h) => { s.hsv.h = h; d.focus = side; });
+                wheelControl('wheel_' + side, () => s.hsv.h, (h) => { s.hsv = { h, s: 1, v: 1 }; d.focus = side; });
                 ringControl('ring_' + side, () => s.brightness, (v) => { s.brightness = v; d.focus = side; });
                 G.panel(cv, t, x0 - 20, 60, 520, 452, side === 'top' ? 'Upper lighting' : 'Lower lighting');
-                geometry['wheel_' + side] = W.wheel(cv, t, x0 + 10, 112, 300, s.hsv, { editing: editor.isEditing('wheel_' + side) });
-                cv.target(x0 + 100, 202, 120, 120, enter('wheel_' + side), 'wheel_' + side);   // (the centre, as on Colours)
+                const hc = { cx: x0 + 170, cy: 282, r: 150, w: 46 };
+                geometry['hue_' + side] = W.hueRing(cv, t, hc.cx, hc.cy, hc.r, hc.w, s.hsv, { editing: editor.isEditing('wheel_' + side), caption: side === 'top' ? 'upper' : 'lower' });
+                cv.target(hc.cx - 65, hc.cy - 65, 130, 130, enter('wheel_' + side), 'wheel_' + side);   // (the disc: the knob's target)
                 geometry['ring_' + side] = W.ring(cv, t, x0 + 410, 262, 70, s.brightness, 'Bright', { editing: editor.isEditing('ring_' + side), colour: hex, width: 14, size: 34 });
                 cv.target(x0 + 370, 222, 80, 80, enter('ring_' + side), 'ring_' + side);
-                G.button(cv, t, x0 + 352, 350, 46, 36, '-', () => { s.brightness = Math.max(0, s.brightness - 5); markDirty('dual'); }, { key: 'ring_' + side + '-' });
-                G.button(cv, t, x0 + 416, 350, 46, 36, '+', () => { s.brightness = Math.min(100, s.brightness + 5); markDirty('dual'); }, { key: 'ring_' + side + '+' });
-                W.swatch(cv, t, x0 + 330, 112, 160, 60, col, null, { size: 22, radius: 12, editing: editor.isEditing('wheel_' + side) });
-                cv.text(col.r + ' ' + col.g + ' ' + col.b, x0 + 410, 196, 15, t.dim, { align: 'center', font: 'num' });
+                G.button(cv, t, x0 + 352, 362, 46, 36, '-', () => { s.brightness = Math.max(0, s.brightness - 5); markDirty('dual'); }, { key: 'ring_' + side + '-' });
+                G.button(cv, t, x0 + 416, 362, 46, 36, '+', () => { s.brightness = Math.min(100, s.brightness + 5); markDirty('dual'); }, { key: 'ring_' + side + '+' });
+                cv.text(col.r + ' ' + col.g + ' ' + col.b, x0 + 410, 170, 15, t.dim, { align: 'center', font: 'num' });
                 const n = ctl.slaves.filter((m) => S.groupOf(m, settings.get('handles') || 'bottom') === side).length;
-                cv.text(n + ' modules', x0 + 160, 440, 15, t.dim, { align: 'center' });
+                cv.text(n + ' modules', x0 + 170, 462, 15, t.dim, { align: 'center' });
             });
-            // the middle column: swap / copy / save / apply
+            // the middle column: the cabin with both groups, swap / copy / save / handles, Apply both
             const mx = 1130, my = 60;
             G.panel(cv, t, mx, my, 450, 452, 'Dual Colour');
             let scene = null;
             try { scene = S.render(dualProgram(), ctl.slaves, Date.now()); } catch (e) { scene = null; }
-            W.carView(cv, t, mx + 14, my + 44, 210, 224, ctl.slaves, scene);
+            W.carView(cv, t, mx + 10, my + 40, 220, 300, ctl.slaves, scene, {
+                legend: [{ colour: C.rgbToHex(rgbOf(d.top.hsv)), text: 'upper' }, { colour: C.rgbToHex(rgbOf(d.bottom.hsv)), text: 'lower' }],
+            });
             let by = my + 50;
-            const bw = 190, bx = mx + 236;
+            const bw = 190, bx = mx + 244;
             G.button(cv, t, bx, by, bw, 44, 'Swap', () => { const a = clone(d.top); d.top = clone(d.bottom); d.bottom = a; markDirty('dual'); }, { key: 'swap' }); by += 54;
             G.button(cv, t, bx, by, bw, 44, 'Copy top down', () => { d.bottom = clone(d.top); markDirty('dual'); }, { key: 'copy' }); by += 54;
             G.button(cv, t, bx, by, bw, 44, 'Save combination', () => { const p = favs.addPreset('Dual ' + C.rgbToHex(rgbOf(d.top.hsv)) + '/' + C.rgbToHex(rgbOf(d.bottom.hsv)), dualProgram()); say('Saved ' + p.name); }, { key: 'savecombo' }); by += 54;
-            G.button(cv, t, bx, by, bw, 44, 'Handles: ' + (settings.get('handles') || 'bottom'), () => { const o = ['top', 'bottom', 'off']; settings.set('handles', o[(o.indexOf(settings.get('handles') || 'bottom') + 1) % 3]); markDirty('dual'); }, { key: 'handles' }); by += 64;
-            G.button(cv, t, mx + 24, by, 0, 50, 'Apply both', () => applyProgram(dualProgram(), 'Applied upper and lower'), { primary: true, key: 'apply' });
-            G.button(cv, t, mx + 190, by, 0, 50, 'Cancel', cancelPage, { key: 'cancel', busy: !dirty.dual });
-            G.button(cv, t, mx + 316, by, 0, 50, 'OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program });
-            linkPill(cv, t, mx + 24, my + 400); statePill(cv, t, mx + 204, my + 400, 220);
-            cv.text(dirty.dual ? 'Preview only until Apply both' : ctl.program && ctl.program.mode === 'dual' ? 'Applied' : 'Not applied', mx + 24, my + 448, 14, t.dim);
+            G.button(cv, t, bx, by, bw, 44, 'Handles: ' + (settings.get('handles') || 'bottom'), () => { const o = ['top', 'bottom', 'off']; settings.set('handles', o[(o.indexOf(settings.get('handles') || 'bottom') + 1) % 3]); markDirty('dual'); }, { key: 'handles' });
+            // the action row, each button after the previous one (auto widths)
+            let ax = mx + 24;
+            const ay = my + 346;
+            ax += G.button(cv, t, ax, ay, 168, 46, 'Apply both', () => applyProgram(dualProgram(), 'Applied upper and lower'), { primary: true, key: 'apply' }) + 8;
+            ax += G.button(cv, t, ax, ay, 112, 46, 'Cancel', cancelPage, { key: 'cancel', busy: !dirty.dual }) + 8;
+            G.button(cv, t, ax, ay, 94, 46, 'OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program });
+            linkPill(cv, t, mx + 24, my + 404, 150); statePill(cv, t, mx + 184, my + 404, 150);
+            cv.text(dirty.dual ? 'Preview only until Apply both' : ctl.program && ctl.program.mode === 'dual' ? 'Applied' : 'Not applied', mx + 344, my + 426, 14, t.dim);
         }
 
         /* ---------- MODES ---------- */

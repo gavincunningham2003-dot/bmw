@@ -107,45 +107,71 @@ function hueRingHit(x, y, geom, slack) {
 /**
  * The cabin from above (nose up, right-hand drive: the driver on the right), each ambient module drawn where it
  * sits in the colour the scene gives it: scene = { 'bus:nad': { r, g, b, brightness } } (lighting_scene.render);
- * a module not in the scene is drawn as OEM (dim). Returns the body rect.
+ * a module not in the scene is drawn as OEM (dim). opts: heading (text above), legend ([{ colour, text }] below),
+ * status (text at the bottom right), oemColour. Returns the body rect.
  */
 function carView(cv, t, x, y, w, h, slaves, scene, opts) {
     const o = opts || {};
     const S = require('./lighting_scene');
-    const bx = x + w * 0.16, bw = w * 0.68, by = y + h * 0.03, bh = h * 0.94;
-    // body, glass, cabin floor
-    cv.roundRect(bx, by, bw, bh, bw * 0.3, withAlpha('#ffffff', 0.10));
-    cv.strokeRoundRect(bx, by, bw, bh, bw * 0.3, 2, withAlpha('#ffffff', 0.22));
-    const cabY = by + bh * 0.27, cabH = bh * 0.52, cabX = bx + bw * 0.10, cabW = bw * 0.80;
-    cv.roundRect(cabX, by + bh * 0.17, cabW, bh * 0.10, 8, withAlpha('#000000', 0.35));          // windscreen
-    cv.roundRect(cabX, cabY, cabW, cabH, 10, withAlpha('#000000', 0.45));                          // cabin
-    cv.roundRect(cabX, cabY + cabH, cabW, bh * 0.07, 8, withAlpha('#000000', 0.3));               // rear window
-    // seats
-    [[0.22, 0.12], [0.58, 0.12], [0.22, 0.58], [0.58, 0.58]].forEach(([fx, fy]) => cv.roundRect(cabX + cabW * fx, cabY + cabH * fy, cabW * 0.2, cabH * 0.26, 6, withAlpha('#ffffff', 0.06)));
-    const oem = o.oemColour || withAlpha('#9fb4ff', 0.28);
-    const colourOf = (m) => { const s = scene && scene[S.key(m)]; if (!s) return { c: oem, on: false }; const k = Math.max(0.15, (s.brightness == null ? 100 : s.brightness) / 100); return { c: C.rgbToHex(C.rgb(s.r * k, s.g * k, s.b * k)), on: true }; };
-    const glow = (xa, ya, xb, yb, m) => {
-        const { c, on } = colourOf(m);
-        if (on) cv.line(xa, ya, xb, yb, 12, withAlpha(c, 0.28));
-        cv.line(xa, ya, xb, yb, on ? 5 : 3, c);
+    const top = y + (o.heading ? 22 : 4), bottom = y + h - (o.legend || o.status ? 30 : 4);
+    const bh = bottom - top, bw = Math.min(w * 0.68, bh * 0.8), bx = x + (w - bw) / 2, by = top;
+    const line = withAlpha('#ffffff', 0.22), shell = withAlpha('#ffffff', 0.07), glass = withAlpha('#000000', 0.42), trim = withAlpha('#ffffff', 0.10);
+    if (o.heading) cv.text(String(o.heading).toUpperCase(), x + w / 2, y + 12, 12, t.dim, { align: 'center', font: 'bold', spacing: 2 });
+    // the body: a wider rear, a narrower nose
+    cv.roundRect(bx, by, bw, bh, bw * 0.30, shell);
+    cv.strokeRoundRect(bx, by, bw, bh, bw * 0.30, 2, line);
+    cv.roundRect(bx + bw * 0.06, by + bh * 0.02, bw * 0.88, bh * 0.28, bw * 0.26, withAlpha('#000000', 0.18));
+    // glass, dashboard, screen, wheel
+    cv.roundRect(bx + bw * 0.13, by + bh * 0.08, bw * 0.74, bh * 0.12, 10, glass);
+    cv.roundRect(bx + bw * 0.08, by + bh * 0.25, bw * 0.84, bh * 0.055, 6, trim);
+    cv.roundRect(bx + bw * 0.42, by + bh * 0.255, bw * 0.16, bh * 0.045, 4, '#000000');
+    const wx = bx + bw * 0.74, wy = by + bh * 0.285, wr = bw * 0.085;
+    cv.arc(wx, wy, wr * 0.72, wr, 0, 360, withAlpha('#ffffff', 0.25));
+    // seats and the console
+    const seat = (sx, sy, sw, sh) => { cv.roundRect(sx, sy, sw, sh, 10, trim); cv.roundRect(sx + sw * 0.15, sy - sh * 0.16, sw * 0.7, sh * 0.2, 6, trim); };
+    seat(bx + bw * 0.16, by + bh * 0.36, bw * 0.26, bh * 0.22); seat(bx + bw * 0.58, by + bh * 0.36, bw * 0.26, bh * 0.22);
+    cv.roundRect(bx + bw * 0.455, by + bh * 0.33, bw * 0.09, bh * 0.28, 5, trim);
+    cv.roundRect(bx + bw * 0.14, by + bh * 0.66, bw * 0.72, bh * 0.15, 10, trim);
+    cv.roundRect(bx + bw * 0.12, by + bh * 0.86, bw * 0.76, bh * 0.06, 5, withAlpha('#000000', 0.25));
+    // the modules
+    const oem = o.oemColour || withAlpha('#9fb4ff', 0.30);
+    // the colour stays vivid; the brightness sets how strongly it glows
+    const colourOf = (m) => { const s = scene && scene[S.key(m)]; if (!s) return { c: oem, on: false, k: 0 }; const k = Math.max(0.1, (s.brightness == null ? 100 : s.brightness) / 100); return { c: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), 0.55 + 0.45 * k), g: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), 0.1 + 0.25 * k), on: true, k }; };
+    const glowLine = (xa, ya, xb, yb, m, wd) => { const { c, g, on } = colourOf(m); if (on) cv.line(xa, ya, xb, yb, (wd || 5) * 2.6, g); cv.line(xa, ya, xb, yb, on ? (wd || 5) : 3, c); };
+    // a door line: an arc bulging with the body's side, from y0 to y1 on side right/left
+    const doorArc = (right, y0, y1, m, inset) => {
+        const { c, g, on } = colourOf(m);
+        const R = bw * 0.62, cxA = bx + bw / 2 + (right ? -1 : 1) * (R - bw / 2 + (inset || 0)), ym = (y0 + y1) / 2;
+        const dA = Math.asin(Math.min(1, (y1 - y0) / 2 / R)) * 180 / Math.PI, base = right ? 90 : 270;
+        if (on) cv.arc(cxA, ym, R - 9, R + 9, base - dA, base + dA, g, { round: true });
+        cv.arc(cxA, ym, R - (on ? 4 : 1.5), R + (on ? 4 : 1.5), base - dA, base + dA, c, { round: true });
     };
-    const dot = (px, py, r, m) => { const { c, on } = colourOf(m); if (on) cv.circle(px, py, r * 2.2, withAlpha(c, 0.22)); cv.circle(px, py, r, c); };
+    const blob = (px, py, rw, rh, m) => { const { c, g, on } = colourOf(m); if (on) cv.roundRect(px - rw * 0.8, py - rh * 0.8, rw * 1.6, rh * 1.6, rh * 0.8, g); cv.roundRect(px - rw / 2, py - rh / 2, rw, rh, rh / 2, c); };
+    const dot = (px, py, r, m) => { const { c, g, on } = colourOf(m); if (on) cv.circle(px, py, r * 2.2, g); cv.circle(px, py, r, c); };
     (slaves || []).forEach((m) => {
-        const cat = S.category(m), right = S.isDriverSide(m), rear = S.isRear(m);
-        const sideX = right ? cabX + cabW - 4 : cabX + 4, dir = right ? -1 : 1;
-        const y0 = rear ? cabY + cabH * 0.52 : cabY + cabH * 0.06, y1 = rear ? cabY + cabH * 0.94 : cabY + cabH * 0.46;
+        const cat = S.category(m), right = S.isDriverSide(m), rear = S.isRear(m), dir = right ? -1 : 1;
+        const edge = right ? bx + bw - 3 : bx + 3;
+        const y0 = rear ? by + bh * 0.60 : by + bh * 0.34, y1 = rear ? by + bh * 0.82 : by + bh * 0.56;
         if (cat === 'dashLine' || cat === 'dashTrim') {
-            // three lines across the top of the cabin: passenger third, centre, driver third
             const centre = m.locationId === 0x15 || m.locationId === 0x16;     // (the car: 0x13 driver, 0x15 centre, 0x17 passenger)
-            const third = cabW / 3, i = centre ? 1 : right ? 2 : 0;
-            glow(cabX + third * i + 6, cabY + 6, cabX + third * (i + 1) - 6, cabY + 6, m);
-        } else if (cat === 'doorLine' || cat === 'doorTrim') glow(sideX, y0, sideX, y1, m);
-        else if (cat === 'handle') dot(sideX + dir * 10, (y0 + y1) / 2, 4, m);
-        else if (cat === 'pocket') glow(sideX + dir * 6, y1 - cabH * 0.12, sideX + dir * 6, y1 - 4, m);
-        else if (cat === 'footwell') dot(cabX + cabW * (right ? 0.68 : 0.32), rear ? cabY + cabH * 0.56 : cabY + cabH * 0.1 + cabH * 0.04, 9, m);
-        else dot(sideX + dir * 14, (y0 + y1) / 2 + 14, 3, m);
+            const i = centre ? 1 : right ? 2 : 0, x0 = bx + bw * 0.08, span = bw * 0.84 / 3;
+            glowLine(x0 + span * i + 5, by + bh * 0.235, x0 + span * (i + 1) - 5, by + bh * 0.235, m, 7);
+        } else if (cat === 'doorLine' || cat === 'doorTrim') doorArc(right, y0, y1, m, 0);
+        else if (cat === 'handle') dot(edge + dir * bw * 0.10, y0 + (y1 - y0) * 0.45, Math.max(3, bw * 0.02), m);
+        else if (cat === 'pocket') doorArc(right, y0 + (y1 - y0) * 0.55, y1 + (y1 - y0) * 0.12, m, bw * 0.06);
+        else if (cat === 'footwell') blob(bx + bw * (right ? 0.71 : 0.29), rear ? by + bh * 0.845 : by + bh * 0.615, bw * 0.2, bh * 0.035, m);
+        else dot(edge + dir * bw * 0.14, (y0 + y1) / 2 + 14, 3, m);
     });
-    if (o.label) cv.text(String(o.label).toUpperCase(), x + w / 2, by + bh + 20, 13, t.dim, { align: 'center', font: 'bold', spacing: 2 });
+    // the legend and the status line under the car
+    if (o.legend) {
+        let lx = x + 8;
+        o.legend.forEach((l) => {
+            cv.circle(lx + 8, bottom + 15, 7, withAlpha(l.colour, 0.3)); cv.circle(lx + 8, bottom + 15, 4.5, l.colour);
+            cv.text(String(l.text).toUpperCase(), lx + 22, bottom + 20, 13, t.text, { spacing: 1 });
+            lx += 30 + cv.textWidth(String(l.text).toUpperCase(), 13, { spacing: 1 });
+        });
+    }
+    if (o.status) cv.text(String(o.status).toUpperCase(), x + w - 8, bottom + 20, 13, o.statusColour || t.dim, { align: 'right', font: 'bold', spacing: 2 });
     return { x: bx, y: by, w: bw, h: bh };
 }
 
