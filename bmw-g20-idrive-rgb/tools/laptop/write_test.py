@@ -13,6 +13,18 @@ invocation so that every frame is approved beforehand:
     python write_test.py --gateway 169.254.49.66 cycle               the same write with each of --colours in turn, --hold s apart
                                                                      (ZEIT = hold + 2 so the module never goes dark between colours,
                                                                      and returns to OEM by itself after the last one)
+    python write_test.py --gateway 169.254.49.66 roof                31 01 A6 21 <ile>: the roof lamp unit's status as the BDC
+                                                                     reports it (INNENLICHT_ILE: fitted, interior light, reading
+                                                                     lights, welcome light, AMBIENT LIGHT on/off, buttons).
+                                                                     Documented as a status routine; it sets nothing. --ile 0..4
+    python write_test.py --gateway 169.254.49.66 sweep --rgb 00FE00  EXPERIMENT: the same write to every address the car did NOT
+                                                                     report (bus 1 NAD 8..31, bus 2 NAD 13..31; never NAD 0),
+                                                                     to see whether an unlisted lamp (the roof) answers. Each
+                                                                     reply is printed; everything times out after --zeit s.
+    python write_test.py --gateway 169.254.49.66 broadcast --bus 2   EXPERIMENT: ONE write to NAD 0 of a bus (2E DA5E / E3D1 00 ...), which
+                                                                     the MGU App Kit's Ambient Config reports reaches every module of
+                                                                     that bus on a G20 BDC_G05, then the bus read back: how many of
+                                                                     its modules show the colour. Not yet verified on this car.
     --bus 1 --nad 1 --rgb FF0000 --zeit 5                           defaults: bus 1, NAD 1 (map pocket passenger front), red, 5 s
     --simulate                                                       the loopback simulated car instead of a gateway
 
@@ -86,7 +98,8 @@ def show_module(reply, bus, nad):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="one gated write to one ambient module (see the file header)")
-    ap.add_argument("step", choices=["status", "dtc", "write", "release", "cycle"])
+    ap.add_argument("step", choices=["status", "dtc", "write", "release", "cycle", "roof", "sweep", "broadcast"])
+    ap.add_argument("--ile", type=int, default=0, choices=[0, 1, 2, 3, 4], help="roof: which interior light unit (0 = ILE_1, the front roof lamp unit)")
     ap.add_argument("--colours", default="FE0000,FE6000,FEFE00,00FE00,00FEFE,0000FE,FE00FE", help="hex colours for cycle, comma separated (max 8)")
     ap.add_argument("--hold", type=int, default=3, help="seconds per colour in cycle (1..8)")
     ap.add_argument("--fade", type=float, default=0, help="cycle: seconds to glide between colours (0 = jump; 0.5..5)")
@@ -150,6 +163,59 @@ def main(argv=None):
             reply = send(c, uds.read_request(did))
             print("  " + explain(reply, 0x22))
             show_module(reply, a.bus, a.nad)
+        elif a.step == "sweep":
+            targets = [(b, n) for b in (1, 2) for n in range(1, 32) if n not in MODULES[b]]
+            assert all(1 <= n <= 31 for _, n in targets) and len(targets) == 43
+            print("sweep: #%s to %d unlisted addresses, ZEIT %d s. Watch the roof light." % (rgb.hex().upper(), len(targets), a.zeit))
+            tally = {}
+            for bus, nad in targets:
+                did = DID_CTRL[bus]
+                payload = bytes([0x2E, did >> 8, did & 0xFF, nad, 0x01, 100, rgb[0], rgb[1], rgb[2], a.zeit])
+                assert len(payload) == 10 and did in (0xDA5E, 0xE3D1) and 0xFF not in payload[6:9]
+                LOG.info("TX 40 <- %s", frame_text(payload))
+                frames = c.request(BDC_BODY, payload, overall_ms=3000, quiet_ms=300,
+                                   until=lambda f: f.src == BDC_BODY and (f.payload[:1] == b"n" or (len(f.payload) >= 3 and f.payload[0] == 0x7F and f.payload[1] == 0x2E)))
+                reply = next((f.payload for f in frames if f.src == BDC_BODY), None)
+                LOG.info("RX 40 -> %s", frame_text(reply) if reply else "no reply")
+                word = explain(reply, 0x2E)
+                tally[word] = tally.get(word, 0) + 1
+                print("  bus %d NAD %2d: %s" % (bus, nad, word))
+                if reply is None:
+                    print("  no reply: stopping the sweep")
+                    break
+            print("summary: " + "; ".join("%d x %s" % (n, w) for w, n in tally.items()))
+            print("everything written here releases by itself within %d s" % a.zeit)
+        elif a.step == "broadcast":
+            did = DID_CTRL[a.bus]
+            payload = bytes([0x2E, did >> 8, did & 0xFF, 0x00, 0x01, a.brightness, rgb[0], rgb[1], rgb[2], a.zeit])
+            assert len(payload) == 10 and payload[3] == 0 and did in (0xDA5E, 0xE3D1) and 0xFF not in payload[6:9]
+            print("whole-bus write: #%s to NAD 0 of bus %d, ZEIT %d s. Watch the lights." % (rgb.hex().upper(), a.bus, a.zeit))
+            reply = send(c, payload)
+            print("  " + explain(reply, 0x2E))
+            if reply and reply[0] == 0x6E:
+                back = send(c, uds.read_request(DID_STATUS[a.bus]))
+                print("  read-back: " + explain(back, 0x22))
+                if back and back[0] == 0x62:
+                    recs = uds.decode_lin_status(back[3:], a.bus)
+                    hit = [r for r in recs if (r["r"], r["g"], r["b"]) == (rgb[0], rgb[1], rgb[2])]
+                    for r in recs:
+                        print("  NAD %2d %-40s rgb %3d %3d %3d  brightness %3d  %s" % (r["nad"], r["location"], r["r"], r["g"], r["b"], r["brightness"], "TOOK IT" if r in hit else "unchanged"))
+                    print("  %d of %d modules on bus %d show the colour: NAD 0 %s on this car" % (len(hit), len(recs), a.bus, "WORKS" if recs and len(hit) == len(recs) else "did NOT reach every module"))
+                    print("  it releases by itself within %d s" % a.zeit)
+        elif a.step == "roof":
+            payload = bytes([0x31, 0x01, 0xA6, 0x21, a.ile])
+            assert len(payload) == 5 and list(payload[:4]) == [0x31, 0x01, 0xA6, 0x21] and 0 <= payload[4] <= 4
+            reply = send(c, payload, overall_ms=8000)
+            print("  " + explain(reply, 0x31))
+            if reply and reply[0] == 0x71:
+                body = reply[4:]
+                names = ["reading light fitted", "interior light fitted", "interior light", "reading light left", "reading light right",
+                         "welcome light", "AMBIENT LIGHT", "button reading light left", "button reading light right"]
+                for name, v in zip(names, body):
+                    word = {0: "no / off", 1: "YES / ON"}.get(v, "0x%02X" % v)
+                    print("  %-28s %s" % (name, word))
+                if len(body) > len(names):
+                    print("  reserve bytes: %s" % frame_text(body[len(names):]))
         elif a.step == "dtc":
             reply = send(c, bytes([0x19, 0x02, 0x0C]), overall_ms=6000)
             print("  " + explain(reply, 0x19))

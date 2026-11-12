@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: colour wheel and circular brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing and Colour Wave modes, saved configurations. Preview on screen, apply on confirmation; the body controller's own light actuator (verified on a G20); OEM restored at a press or by itself.",
-  "version": "0.3.0",
+  "description": "BMW Ambient RGB Controller: colour wheel and circular brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep and Sport Pulse, lighting by driving mode, saved configurations. Preview on screen, apply on confirmation; the body controller's own light actuator (verified on a G20); the factory lighting keeps priority and is restored at a press or by itself.",
+  "version": "0.4.0",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -23,6 +23,25 @@
     "de.bmw.infotainment.vehicle.Vehicle2": {
       "_optional": "no parked check",
       "statusCarSpeed2": "rs"
+    },
+    "de.bmw.body.interiorillumination.AmbientLight": {
+      "_optional": "no factory lighting read-out on Diagnostics",
+      "ambientLightActive": "rs",
+      "brightnessAmbientLight": "rs",
+      "brightnessAmbientContourLine": "rs",
+      "currentInteriorLightProfile": "rs"
+    },
+    "de.bmw.infotainment.misc.ComfortFunctionIuK": {
+      "_optional": "no factory colour read-out on Diagnostics",
+      "statusAmbientLightInteriorColour": "rs"
+    },
+    "de.bmw.infotainment.drivingexcitement.FES": {
+      "_optional": "no lighting by driving mode",
+      "statusFESVehicleDynamicSwitchHMI": "rs"
+    },
+    "de.bmw.infrastructure.VehicleCondition": {
+      "_optional": "the car locked and left is not noticed (the lighting still lapses by itself)",
+      "VehicleCondition": "s"
     }
   },
   "screens": [
@@ -131,6 +150,134 @@
         [
           "on",
           "Yes: the last applied lighting comes back when the app starts (parked, link ready)"
+        ]
+      ]
+    },
+    {
+      "key": "txMode",
+      "label": "Writes to the car",
+      "type": "choice",
+      "default": "individual",
+      "options": [
+        [
+          "individual",
+          "One per module (verified)"
+        ],
+        [
+          "broadcast",
+          "Whole bus where it saves writes (NAD 0, test first)"
+        ]
+      ]
+    },
+    {
+      "key": "verify",
+      "label": "Read back after Apply",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On: check every module took its colour"
+        ]
+      ]
+    },
+    {
+      "key": "oemOffRule",
+      "label": "Factory ambient lighting off",
+      "type": "choice",
+      "default": "release",
+      "options": [
+        [
+          "release",
+          "Release custom lighting"
+        ],
+        [
+          "ignore",
+          "Keep custom lighting"
+        ]
+      ]
+    },
+    {
+      "key": "resume",
+      "label": "Lighting back when the car is unlocked",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On"
+        ]
+      ]
+    },
+    {
+      "key": "welcome",
+      "label": "Welcome sweep at start",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On"
+        ]
+      ]
+    },
+    {
+      "key": "modeFollow",
+      "label": "Lighting follows the driving mode",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On"
+        ]
+      ]
+    },
+    {
+      "key": "sportPulse",
+      "label": "Red pulse when Sport is picked",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On"
+        ]
+      ]
+    },
+    {
+      "key": "conflict",
+      "label": "Another lighting controller found",
+      "type": "choice",
+      "default": "refuse",
+      "options": [
+        [
+          "refuse",
+          "Refuse to write"
+        ],
+        [
+          "ignore",
+          "Write anyway"
         ]
       ]
     },

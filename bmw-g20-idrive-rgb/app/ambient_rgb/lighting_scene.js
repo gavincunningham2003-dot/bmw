@@ -118,9 +118,21 @@ function wavePosition(m) {
 }
 
 /* ---------- programs ---------- */
-const MODES = Object.freeze(['solid', 'dual', 'zones', 'rainbow', 'fade', 'breathing', 'wave']);
-const MODE_LABELS = Object.freeze({ solid: 'Solid Colour', dual: 'Dual Colour', zones: 'Zones', rainbow: 'Rainbow', fade: 'Smooth Fade', breathing: 'Breathing', wave: 'Colour Wave' });
-const ANIMATED = Object.freeze({ rainbow: true, fade: true, breathing: true, wave: true });
+const MODES = Object.freeze(['solid', 'dual', 'zones', 'rainbow', 'fade', 'breathing', 'wave', 'welcome', 'pulse']);
+const MODE_LABELS = Object.freeze({ solid: 'Solid Colour', dual: 'Dual Colour', zones: 'Zones', rainbow: 'Rainbow', fade: 'Smooth Fade', breathing: 'Breathing', wave: 'Colour Wave', welcome: 'Welcome Sweep', pulse: 'Sport Pulse' });
+const ANIMATED = Object.freeze({ rainbow: true, fade: true, breathing: true, wave: true, welcome: true, pulse: true });
+/*
+ * The one-time effects and the speed steps follow the MGU App Kit's Ambient Config (apps/ambient_config/scenes.js,
+ * MIT, (c) its authors; see THIRD_PARTY.md): welcome = the lights come on from the dash to the rear over 2.6 s,
+ * pulse = one long red for 1.5 s of 2 s; speed 1 slow (x1.6 the base time), 2 normal, 3 fast (x0.55).
+ * A one-time program runs once and then gives way to its `then` program (null: the car's own lighting).
+ */
+const ONCE = Object.freeze({ welcome: 2600, pulse: 2000 });
+const PULSE_RED_MS = 1500;
+const SPEED = Object.freeze({ 1: 1.6, 2: 1, 3: 0.55 });
+const SPEED_LABELS = Object.freeze({ 1: 'Slow', 2: 'Normal', 3: 'Fast' });
+/** How long a one-time program lasts (ms); 0 for one that runs on. */
+const onceMs = (p) => (p && ONCE[p.mode]) || 0;
 
 const DEFAULTS = Object.freeze({
     solid: { mode: 'solid', colour: { r: 120, g: 60, b: 254 }, brightness: 100, zone: 'all' },
@@ -130,6 +142,8 @@ const DEFAULTS = Object.freeze({
     fade: { mode: 'fade', colours: [{ r: 254, g: 0, b: 0 }, { r: 0, g: 254, b: 0 }, { r: 0, g: 0, b: 254 }], transitionMs: 2000, holdMs: 1000, brightness: 100, zone: 'all' },
     breathing: { mode: 'breathing', colour: { r: 120, g: 60, b: 254 }, minBrightness: 10, maxBrightness: 100, periodS: 6, zone: 'all' },
     wave: { mode: 'wave', hueSpan: 120, baseHue: 240, periodS: 8, brightness: 100, zone: 'all', saturation: 1 },
+    welcome: { mode: 'welcome', colour: { r: 120, g: 60, b: 254 }, brightness: 100, then: null },
+    pulse: { mode: 'pulse', colour: { r: 120, g: 60, b: 254 }, brightness: 100, then: null },
 });
 
 /** A complete program from a possibly partial one (deep enough for the fields the renderer reads). */
@@ -147,6 +161,9 @@ function normalise(p) {
     if (out.colours) out.colours = out.colours.map(rgb);
     if (out.minBrightness != null) { out.minBrightness = clampPct(out.minBrightness); out.maxBrightness = clampPct(out.maxBrightness); if (out.minBrightness > out.maxBrightness) { const t = out.minBrightness; out.minBrightness = out.maxBrightness; out.maxBrightness = t; } }
     if (!/^(top|bottom|off)$/.test(out.handlesTo || '')) out.handlesTo = 'bottom';
+    if (out.speed != null) out.speed = SPEED[out.speed] ? Number(out.speed) : 2;
+    // a one-time program's follow-on: a complete still or running program, never another one-time one
+    if (ONCE[mode]) out.then = out.then && !ONCE[out.then.mode] ? normalise(out.then) : null;
     return out;
 }
 const rgb = (c) => ({ r: clampByte(c && c.r), g: clampByte(c && c.g), b: clampByte(c && c.b) });
@@ -159,7 +176,8 @@ const isAnimated = (p) => !!(p && ANIMATED[p.mode]);
 function render(program, modules, now, opts) {
     const p = normalise(program);
     const t0 = (opts && opts.phase0) || 0;
-    const t = ((now || 0) - t0) / 1000;
+    const ms = (now || 0) - t0;
+    const t = ms / 1000 / (SPEED[p.speed] || 1);
     const scene = {};
     const put = (m, colour, brightness) => { scene[key(m)] = { r: clampByte(colour.r), g: clampByte(colour.g), b: clampByte(colour.b), brightness: clampPct(brightness) }; };
     const inZone = (zone) => { const f = zoneFilter(zone, { handlesTo: p.handlesTo }); return modules.filter((m) => f(m)); };
@@ -210,6 +228,19 @@ function render(program, modules, now, opts) {
             });
             break;
         }
+        case 'welcome':
+        case 'pulse': {
+            // what the lights end on: the follow-on program at this moment, or this program's own colour everywhere
+            const end = p.then ? render(p.then, modules, now, opts) : null;
+            modules.forEach((m) => {
+                const own = end ? end[key(m)] : { r: p.colour.r, g: p.colour.g, b: p.colour.b, brightness: p.brightness };
+                if (!own) return;                                        // a module the follow-on leaves to the car
+                if (p.mode === 'pulse') { if (ms < PULSE_RED_MS) put(m, { r: 254, g: 0, b: 0 }, 100); else put(m, own, own.brightness); return; }
+                const front = ms / ONCE.welcome * 1.4 - 0.2, f = Math.max(0, Math.min(1, (front - wavePosition(m)) / 0.2));
+                put(m, own, own.brightness * f);
+            });
+            break;
+        }
         default: break;
     }
     return scene;
@@ -238,6 +269,8 @@ function describe(p, modules) {
         case 'fade': return 'fade ' + q.colours.map(hex).join(' ') + ' ' + (q.transitionMs / 1000) + ' s';
         case 'breathing': return 'breathing ' + hex(q.colour) + ' ' + q.minBrightness + '-' + q.maxBrightness + '% ' + q.periodS + ' s';
         case 'wave': return 'wave hue ' + q.baseHue + ' ±' + q.hueSpan + ', ' + q.periodS + ' s';
+        case 'welcome': return 'welcome sweep' + (q.then ? ', then ' + describe(q.then, modules) : '');
+        case 'pulse': return 'sport pulse' + (q.then ? ', then ' + describe(q.then, modules) : '');
         default: return q.mode;
     }
 }
@@ -253,6 +286,6 @@ module.exports = {
     key, clampByte, clampPct, wrapHue, hsvToRgb, rgbToHsv, mix, rgb,
     CATEGORY, category, isFront, isRear, isDriverSide, groupOf, wavePosition,
     ZONES, ZONE_NAMES, ZONE_LABELS, zoneFilter, zoneLabel,
-    MODES, MODE_LABELS, ANIMATED, DEFAULTS, normalise, isAnimated, render, diff, describe,
+    MODES, MODE_LABELS, ANIMATED, ONCE, SPEED, SPEED_LABELS, onceMs, DEFAULTS, normalise, isAnimated, render, diff, describe,
     presetFrom, presetsToJson, presetsFromJson,
 };

@@ -82,6 +82,13 @@ verified. Still to measure on the head unit: the TASU latency per write (the 14 
 sets the Colour Wave frame rate (3.8 frames/s at 14 ms in simulation; the Modes page says whether the
 measured link is fast enough). Brightness values other than 100 have not been shown on the car.
 
+## 2c. App 0.4.0 (2026-11-12): built, not on the car
+
+Whole-bus writes behind a setting, Welcome Sweep and Sport Pulse, speed steps, lighting by driving mode, the
+factory gate (locked or left, factory lighting off, another controller), read-back, hold times, the two-bus
+refresh fix. See [CHANGELOG.md](CHANGELOG.md). Blocked on the head unit's coding being restored (apps do not start
+since the flash of 2026-11-05). Car stages: INSTALLATION.md part G.
+
 ## 3. Engineering actions after the test
 
 | Result | Action |

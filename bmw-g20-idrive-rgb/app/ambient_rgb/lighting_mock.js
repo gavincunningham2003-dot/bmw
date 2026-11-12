@@ -35,6 +35,8 @@ class MockBdc {
         this.rejectNrc = o.rejectNrc || null;
         this.dropNext = o.dropNext || 0;
         this.busyOnce = !!o.busyOnce;
+        this.noBroadcast = !!o.noBroadcast;
+        this.deafKeys = new Set(o.deafKeys || []);                   // modules that ignore NAD 0 (as bus 1 NAD 1 did on the G20, 2026-11-12)                          // refuse NAD 0 (a controller without the whole-bus write)
         this.busyEvery = o.busyEvery || 0;                           // every Nth write answers NRC 21 (0 = never)
         this.rejectKeys = new Set(o.rejectKeys || []);               // 'bus:nad' modules that refuse writes with NRC 31
         this.offline = !!o.offline;
@@ -102,15 +104,23 @@ class MockBdc {
             if (data.length !== 9) return neg(0x13);
             const nad = data[2];
             if (nad > 31) return neg(0x31);
-            const s = this.slaves.find((x) => x.nad === nad && x.bus === (did === P.DID.LIN2_LAYERING ? 2 : 1));
-            if (!s) return neg(0x31);
-            if (this.rejectKeys.has(s.bus + ':' + s.nad)) return neg(0x31);
-            // as the car: a colour byte of 0xFF leaves that channel unchanged
-            s.active = data[3] === 1; s.brightness = data[4];
-            if (data[5] !== 0xFF) s.r = data[5];
-            if (data[6] !== 0xFF) s.g = data[6];
-            if (data[7] !== 0xFF) s.b = data[7];
-            s.until = data[3] === 1 ? this.now() + data[8] * 1000 : 0;
+            const bus = did === P.DID.LIN2_LAYERING ? 2 : 1;
+            // NAD 0: every module of the bus (reported car-tested on a G20 BDC_G05 by the MGU App Kit's Ambient Config;
+            // NOT yet verified on this project's car). noBroadcast simulates a controller that refuses it.
+            if (nad === 0 && this.noBroadcast) return neg(0x31);
+            const hit = nad === 0 ? this.slaves.filter((x) => x.bus === bus) : this.slaves.filter((x) => x.nad === nad && x.bus === bus);
+            if (!hit.length) return neg(0x31);
+            if (nad !== 0 && this.rejectKeys.has(hit[0].bus + ':' + hit[0].nad)) return neg(0x31);
+            if (nad === 0) this.broadcasts = (this.broadcasts || 0) + 1;
+            hit.forEach((s) => {
+                if (nad === 0 && this.deafKeys.has(s.bus + ':' + s.nad)) return;
+                // as the car: a colour byte of 0xFF leaves that channel unchanged
+                s.active = data[3] === 1; s.brightness = data[4];
+                if (data[5] !== 0xFF) s.r = data[5];
+                if (data[6] !== 0xFF) s.g = data[6];
+                if (data[7] !== 0xFF) s.b = data[7];
+                s.until = data[3] === 1 ? this.now() + data[8] * 1000 : 0;
+            });
             return [0x6E, data[0], data[1]];
         }
         return neg(0x11);

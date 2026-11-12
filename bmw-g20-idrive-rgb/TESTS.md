@@ -9,7 +9,7 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Node (88 tests, all passing)
+## Node (121 tests, all passing)
 
 | File | Covers |
 |---|---|
@@ -20,6 +20,8 @@ npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a 
 | `test_controller.js` (17) | on the simulated BDC with fake timers: probe; **nothing written before apply**; solid writes all 19 once then only keep-alives at the right times, never lapsing; dual on the right modules with the handle setting (and the release of the handles when set to off); zones keeping other zones; **restore releases every module and reports exactly** (a refused release is reported, a dead transport is reported); **apply / restore never interleave**, a second apply supersedes; **parking fail-closed** (unknown and moving both refused, nothing written); animated programs tick, pace to the transport, skip unchanged and force stale; breathing then a static apply stops the ticker; busy absorbed, lost link stops control and reconnects on availability without re-applying; every module refusing turns control off; status; every byte allowed and never 0xFF |
 | `test_bdc_uds.js` (12) | the real `kit/diag.js` on a faked TASU bus: probe reads; **disarmed = dry runs only**; armed bytes; ZEIT cap; unknown variant refused; no modules refused; `10 03` retry; transport away / back; lost mid-animation; timeout; the gate against forged services; every byte of a session allowed |
 | `test_favourites.js` (5) | colours and complete configurations (replace by name, persist, remove) |
+| `test_oem_lighting.js` (6) | the read-only factory lighting read-out: profile names, both interfaces on instance 1, decoding, **only `watch` is ever called (no set, no method)**, unreachable interfaces reported, `app.json` asks for the fields without a write flag and as optional, the Diagnostics rows |
+| `test_v040.js` (27) | **the planner** (uniform cabin = 2 writes, mixed colours = whole bus then the exceptions, never NAD 0 on a bus with a module left to the car, never when it saves nothing, releases); **the controller with whole-bus writes** (solid in 2 writes with all 19 showing it, dual correct with fewer writes, zones untouched, a car that refuses NAD 0 falls back for good, rainbow frames of 2 writes); **Welcome Sweep and Sport Pulse** (shape, run once, follow-on or the car's lighting), the speed steps, hold times, read-back; **the gate** (no apply, no renewals); **both buses on a refresh** with either failing; 13 modules on one bus; **driving modes** (names, wire numbers, plug-in hybrid, choices kept, the car's state); **the app** (following off by default, the mode's program, BMW original, the pulse; locked or left releases and blocks; factory lighting off; another controller; the Driving page) |
 | `test_ui.js` (12) | `main.js` through the harness: every page draws; **preview only** (taps on the hue ring and the dial change the draft, zero writes, Apply writes); **the rotary flow** (enter the ring, 10 clicks = 30°, press confirms and applies, enter the dial, turn, tilt left cancels back to the entered value with the car unchanged); the setting off (only Apply applies); Dual (taps, swap, copy, Apply both drives upper and lower differently, handle follows the lower group, save combination); Modes (Rainbow with its speed, Start, Breathing, Restore stops cleanly); zones from the Colours page keep other zones; Favourites (colours and configurations, apply, delete); Cancel discards; Diagnostics; switching the link to the car without a transport refuses Apply; **apply at start** (off by default, the last applied lighting comes back with the setting on, Restore OEM clears it) |
 
 ## Python (24 tests, all passing)
@@ -27,10 +29,10 @@ npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a 
 Unchanged by this upgrade: HSFZ framing, UDS decoders (the car's records), the read-only policy and
 redaction, scans against the loopback simulated car (pending, busy, two buses), the catalog search.
 
-## Results (last run on the development laptop, 2026-11-05)
+## Results (last run on the development laptop, 2026-11-12)
 
 ```
-TOTAL: 88 passed, 0 failed            (node tests/node/run_all.js)
+TOTAL: 121 passed, 0 failed            (node tests/node/run_all.js)
 Ran 24 tests ... OK                   (python -m unittest discover -s tests/python)
 ```
 
@@ -40,6 +42,9 @@ Ran 24 tests ... OK                   (python -m unittest discover -s tests/pyth
 |---|---|---|
 | `2E DA5E` / `E3D1` per-module colour and brightness, release, timeout, no faults | yes | **yes (2026-11-04, over ENET)** |
 | Dual colour (upper / lower at once), zones, modes, fades, keep-alive timing, scheduler behaviour, preview/applied separation, rotary flow | yes | not yet: the app has not been installed on the head unit |
+| Whole-bus writes (NAD 0), Welcome Sweep, Sport Pulse, speed steps, read-back, hold times above 10 s | yes | **NAD 0: yes, with a catch (2026-11-12, over ENET)**: bus 2 took it on 12 of 12 modules; bus 1 on 6 of 7 (NAD 1, the passenger front map pocket, kept the car's colour). The rest: not yet |
+| Driving-mode values, the car's state (locked / in use), the factory lighting read-out, the gate | yes (fed by hand) | **no**: the app has not run on the head unit; the mode table is Ambient Config's |
+| The roof lamp unit's status routine `31 01 A621`, writes to unlisted addresses | - | yes (2026-11-12): the routine answers; all 43 unlisted addresses answer positive, which proves nothing about a lamp |
 | TASU latency and whether it accepts overlapping requests | assumed one at a time (kit evidence) | not measured |
 | Brightness values other than 100 | simulated | only 100 (and 0 by the OEM function) seen; the dial's other levels are untested on the car |
 | Colour Wave at an acceptable rate | 3.8 frames/s at 14 ms per write in simulation | depends on the head unit's TASU latency |

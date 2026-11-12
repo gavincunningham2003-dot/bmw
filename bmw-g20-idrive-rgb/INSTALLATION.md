@@ -90,3 +90,23 @@ The app starts with **Lighting link = Simulated BDC** and **Write to the car = D
 - SSH: `python ssh_enable.py close` (stop the service) or `disable` (revert persistence too). The debug
   flash itself stays; nothing in this project reverses it.
 - The lights: nothing persists in the body controller; they revert within ZEIT by themselves.
+
+## G. 0.4.0: what to switch on, and in which order
+
+Everything new in 0.4.0 is off or on its safe value after an install. Switch things on one at a time, parked:
+
+1. **First use as in part E**, with *Writes to the car* left on *One per module*.
+2. **The whole-bus write**, from the laptop first: `python write_test.py --gateway <ip> broadcast --bus 1 --rgb 00FE00`
+   and the same with `--bus 2`. Only if both say every module took the colour, set *Writes to the car* to
+   *Whole bus where it saves writes*. The Diagnostics page then counts the whole-bus writes; if the car ever
+   refuses one, the app goes back to single writes by itself and says so there.
+3. **Read back after Apply**: on, apply a colour, and check Diagnostics reports 19 read back ok.
+4. **Factory lighting off** and **lock and leave**: with a colour applied, switch the factory ambient lighting
+   off, then lock the car and walk away. Each must release the lighting (Diagnostics, "Gate"). Only after this
+   raise the hold time (ZEIT) above 10 s.
+5. **Driving modes**: open the Driving page, change the driving mode in the car and read what "The car says"
+   shows for each mode. Only when the names match what you picked, set choices and switch *Follow driving mode* on.
+   The parked rule still applies: while driving, a mode change is noted and not applied.
+
+Build, test and install commands are unchanged: `npm test`, `npm run test:py`, `python scripts/build_app.py`,
+then part D.

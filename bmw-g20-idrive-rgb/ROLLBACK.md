@@ -46,3 +46,13 @@
 
 Code, flash or write to any ECU other than the BDC body's two documented lighting identifiers; use the
 Fault Scanner's "clear all" during tests; test while driving or with the engine off on a weak battery.
+
+## 6. 0.4.0 additions
+
+- Every new behaviour has an off switch in Settings: *Writes to the car* back to *One per module*, *Read back
+  after Apply* off, *Lighting follows the driving mode* off, *Lighting back when the car is unlocked* off.
+- A longer hold (ZEIT up to 254 s) means a colour can outlive a crashed app for that long. Restore OEM, or the
+  release frame from the laptop (`write_test.py release`), hands the modules back at once. Keep 10 s until the
+  lock-and-leave release has been seen working.
+- The app still codes nothing, flashes nothing and stores nothing on the body controller. `modes.json` and
+  `favourites.json` in the app's data folder are the only files it writes.

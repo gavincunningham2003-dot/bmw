@@ -169,3 +169,48 @@ release:                    2E DA 5E <NAD> 00 00 00 00 00 00  (ZUSTAND 0, ZEIT 0
 `21 busy` (retry after a second; seen while a LIN poll was pending), `22 conditionsNotCorrect`, `31
 requestOutOfRange` (bad DID/NAD; seen for F191/F195/D5D3), `33 securityAccessDenied` (stop), `7E`/`7F`
 (open `10 03` once, retry), `78` pending (wait, seen), `13` length (byte order or count wrong: stop).
+
+## 8. The factory lighting interface on the head unit, and the roof light (2026-11-12)
+
+**The roof light.** This car's roof lamp unit glows in the factory ambient colour (the owner sees it go orange,
+green, white with the menu) and goes out when the factory ambient lighting is switched off. It is NOT one of the
+19 RGB modules: three reads of `DA5F` / `E3D1` across a colour change show 19 modules and no roof location, and
+per-module writes do not reach it. `22 D5DE` (pin mapping) = `01 01 01 01 01 00 00 00`: `58_Ambl_1..3` not
+configured. The roof unit `0x56` answers `22 F1 50` = `0F2090` (FZD_G11); its public description has no ambient
+colour function. BDC_G05 reports the roof lamp unit (ILE) only through routine `31 A621` as on / off (never run).
+Status: the roof follows the FACTORY lighting; no diagnostic colour control for it is known.
+
+**The head unit's own interface.** From the unit's master catalog (`/etc/oap/someip/someip-interfaces.json`,
+copied off this car; BMW's file, never in this repository), found with `tools/laptop/catalog_search.py`:
+
+| Interface | Fields | Status |
+|---|---|---|
+| `de.bmw.body.interiorillumination.AmbientLight` (service 45214, instance 1) | `ambientLightActive` Bool, `brightnessAmbientLight` UInt8, `brightnessAmbientContourLine` UInt8, `currentInteriorLightProfile { currentLightProfileId }`, `startupInteriorLightProfile`, `currentProgram`; each get / set / notify | IN THE CATALOG; not exercised on the car |
+| `de.bmw.infotainment.misc.ComfortFunctionIuK` (service 46354, instance 1) | `statusAmbientLightInteriorColour` (get / notify): hue UInt16, menu selection `FARBAUSWAHL_1..12`, mode; `ambientLightInteriorColour` (set): the same as controls | IN THE CATALOG; not exercised on the car |
+
+`CurrentLightProfileId`: NONE 0, BRONZE 1, MINT 2, ROSE 3, WARM_WHITE 4, COLD_WHITE 5, SKYBLUE 6, TOXIC_YELLOW 7,
+ORANGE 8, COLOUR1..4 9..12, FIRE 80, WAVE 81, REDUCED 82, SUNSHINE_AND_SEA_WAVE 83, COLORFUL 84, REDUCED_FOND 85,
+BRIGHT_WHITE 86, WARM_COLORS 87, GREEN_SHIMMERING 88.
+
+**What the app does with it: reads only.** `oem_lighting.js` subscribes to and reads the four `AmbientLight`
+fields and `statusAmbientLightInteriorColour`, and the Diagnostics page shows them as "Factory light" and
+"Factory colour". `app.json` lists the fields with `rs` only, so the installer leaves the setters out of the
+app's interface configs; both interfaces are `_optional`. UNKNOWN until it runs on the car: whether an installed
+app may reach them, which of the two this G20 fills, and whether the hue is honoured. A set (so that the roof
+follows the app) is a separate step that needs the owner's go and a `w` flag.
+
+## 9. Whole-bus writes (NAD 0) and what 0.4.0 takes from Ambient Config (2026-11-12)
+
+| Claim | Source | Status on this car |
+|---|---|---|
+| `2E DA5E 00 ...` / `2E E3D1 00 ...` reaches every module of that LIN bus | MGU App Kit, `apps/ambient_config/lights.js`: "NAD 0 reaches every light of a bus at once (car-tested, G20 BDC_G05)" | **VERIFIED WITH A CATCH (2026-11-12, ENET, `write_test.py broadcast`)**: bus 2 `2E E3 D1 00 01 64 00 FE 00 05` -> `6E E3 D1` in 16 ms, read-back 12 of 12 modules at 0 254 0. Bus 1 `2E DA 5E 00 ...` -> `6E DA 5E`, read-back 6 of 7: **NAD 1 (map pocket passenger front) kept the car's colour**. A second run on bus 1 the same evening took on 7 of 7, so the miss is occasional, not a property of NAD 1. The app therefore always reads back after a still Apply in whole-bus mode, repairs a module that missed and writes it singly from then on. Two earlier attempts ended with the gateway closing the connection (WinError 10054) before any reply; the third went through. |
+| A positive `6E` does not prove a module took the colour | same file | consistent with the sweep above; hence the optional read-back after Apply |
+| One write through the head unit's gateway takes about 200 ms | same file | NOT MEASURED here (14 ms over ENET from the laptop); the Diagnostics page shows the measured figure once the app runs |
+| A still colour may hold 60 s, renewed at 40 s | same file | ZEIT up to 254 is documented; this project has only used up to 10 s on the car |
+| The factory colour is set through `ComfortFunctionIuK.ambientLightInteriorColour` with a slot `FARBAUSWAHL_1..12`, every other field "not filled" | `apps/ambient_config/ambient.js` | NOT USED: this app only reads the status side (section 8) |
+| Driving mode from `FES.statusFESVehicleDynamicSwitchHMI.actualValueModeDrivingExperience`, PHEV values 15..23 | `ambient.js` | NOT VERIFIED on the 330e; the app logs every raw value and following is off by default |
+| The car locked and left = `VehicleCondition.statusConditionVehicle` 1..3 | `kit/runtime/car.js`, `main.js` | NOT VERIFIED here |
+
+The app's default stays one write per module. Stages on the car, each only after the one before it passed:
+read-only discovery; one module; `write_test.py broadcast` on each bus with the read-back; Restore OEM; factory
+lighting off; lock and leave; a still scene; the moving modes; driving modes.

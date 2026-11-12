@@ -30,10 +30,16 @@ const { Favourites } = require('./favourites');
 const { MockLightingController } = require('./lighting_mock');
 const { BdcUdsLightingController } = require('./lighting_bdc_uds');
 const { SomeIpLightingController } = require('./lighting_someip');
+const { OemLighting } = require('./oem_lighting');
+const { DrivingModes } = require('./driving_modes');
+const fs = require('fs');
 
-const PAGES = ['Colours', 'Dual', 'Modes', 'Favourites', 'Diagnostics'];
+const PAGES = ['Colours', 'Dual', 'Modes', 'Favourites', 'Diagnostics', 'Driving'];
+// another ambient-light controller on the same head unit (IterioDev's Comfort service): two writers would keep
+// overwriting each other's colours (the check is Ambient Config's, others.js)
+const COMFORT_SOCK = process.env.AMBIENT_RGB_COMFORT_SOCK || '/run/iteriodev-comfort/ctl.sock';
 const ZONE_ORDER = ['all', 'dashboard', 'frontDoors', 'rearDoors', 'footwells', 'upper', 'lower'];
-const MODE_ORDER = ['solid', 'dual', 'rainbow', 'fade', 'breathing', 'wave'];
+const MODE_ORDER = ['solid', 'dual', 'rainbow', 'fade', 'breathing', 'wave', 'welcome', 'pulse'];
 const hsvOf = (c) => C.rgbToHsv(c);
 const rgbOf = (hsv) => C.hsvToRgb(hsv.h, hsv.s, hsv.v);
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -44,7 +50,22 @@ mgu.run({
         const favs = new Favourites(ctx.dataDir, log);
         const editor = new W.Editor(ctx, log);
         let page = 0, flash = null, probing = false, busy = false, deleteMode = false;
-        let ctl = null, parked = null;
+        let ctl = null, parked = null, oem = null, drive = null;
+        let suspended = null, lastGate = null;
+
+        /* ---------- the factory gate: when custom lighting must stay off ----------
+         * The factory lighting keeps priority: the car locked or left, the factory ambient lighting switched off (setting),
+         * or another controller driving the same modules. While it says why, nothing is applied and nothing is renewed. */
+        const conflict = () => { if (settings.get('conflict') === 'ignore') return false; try { return fs.existsSync(COMFORT_SOCK); } catch (e) { return false; } };
+        function factoryGate() {
+            if (conflict()) return 'another ambient lighting controller is running on this head unit (IterioDev Comfort)';
+            if (drive && drive.away() === true) return 'the car is locked or left: the factory lighting has it';
+            if (oem && settings.get('oemOffRule') !== 'ignore') {
+                const st = oem.state();
+                if (st.active === false || st.active === 0 || st.mode === 'AUS' || st.mode === 0) return 'the factory ambient lighting is switched off';
+            }
+            return null;
+        }
         const say = (text, ms) => { flash = { text, until: Date.now() + (ms || 2500) }; };
 
         /* ---------- drafts (previews): one per page, never sent anywhere by themselves ---------- */
@@ -64,10 +85,11 @@ mgu.run({
                 log, refreshSeconds: Number(settings.get('refresh')) || 10, frameMs: Number(settings.get('frame')) || 80,
                 maxInFlight: settings.get('inflight') === '2' ? 2 : 1, parkedPolicy: settings.get('parked') === 'lenient' ? 'lenient' : 'strict',
                 parked: () => (parked ? (parked.speed() === null ? null : !parked.moving()) : null),
+                gate: factoryGate, txMode: settings.get('txMode'), verify: settings.get('verify') === 'on',
             };
             const backend = settings.get('backend');
             if (backend === 'bdc') {
-                ctl = new BdcUdsLightingController(Object.assign(common, { signals: ctx.signals, armed: settings.get('arm') === 'on', allowUnknownVariant: settings.get('unknownVariant') === 'on' }));
+                ctl = new BdcUdsLightingController(Object.assign(common, { signals: ctx.signals, armed: settings.get('arm') === 'on', allowUnknownVariant: settings.get('unknownVariant') === 'on', maxSeconds: Math.max(30, Math.min(254, Number(settings.get('refresh')) || 10)) }));
                 try { await ctl.init(); } catch (e) { log.warn('diagnostic link: ' + e); }
             } else if (backend === 'someip') {
                 ctl = new SomeIpLightingController(Object.assign(common, { signals: ctx.signals }));
@@ -84,6 +106,52 @@ mgu.run({
         }
         await makeController();
         try { parked = require('./kit/parked').watch(ctx, log); } catch (e) { log.warn('parked: ' + e); }
+        // the factory lighting as the head unit knows it: subscribed and read, never written (see oem_lighting.js)
+        oem = new OemLighting(ctx.signals, log);
+        oem.start().catch((e) => log.warn('factory lighting read-out: ' + e));
+        // the driving mode and whether the car is in use (read only), and a lighting choice per mode
+        drive = new DrivingModes({ signals: ctx.signals, log, dataDir: ctx.dataDir });
+        drive.start().catch((e) => log.warn('driving modes: ' + e));
+
+        /* The gate watched: custom lighting is released when it closes; it comes back by itself only with the setting on. */
+        const still = (p) => (p && S.onceMs(p) ? p.then : p);
+        // (one check at a time: the timer, the car's state and a test may all ask at once)
+        let gateOp = Promise.resolve();
+        const gateTick = () => { const p = gateOp.then(gateStep, gateStep); gateOp = p.catch(() => {}); return p; };
+        async function gateStep() {
+            if (!ctl || busy) return;
+            const why = factoryGate();
+            if (why && ctl.program) {
+                suspended = still(ctl.program);
+                busy = true;
+                try { await ctl.restoreOem(); } finally { busy = false; }
+                log.info('custom lighting released: ' + why);
+                say('Custom lighting released: ' + why, 4500);
+            } else if (!why && lastGate && suspended && !ctl.program && settings.get('resume') === 'on') {
+                const p = suspended; suspended = null;
+                busy = true;
+                try { const r = await ctl.apply(settings.get('welcome') === 'on' ? { mode: 'welcome', then: p } : p); if (r.ok) say('Lighting back on: ' + S.describe(p, ctl.slaves), 3000); else log.info('resume refused: ' + (r.reason || 'refused')); } finally { busy = false; }
+            }
+            lastGate = why;
+        }
+        const gateTimer = setInterval(() => gateTick().catch((e) => log.warn('gate: ' + e)), 1500);
+        if (gateTimer.unref) gateTimer.unref();
+        drive.on('away', () => gateTick().catch((e) => log.warn('gate: ' + e)));
+
+        /* The driving mode followed (setting, off by default): the mode's own program, the driver's lighting, or BMW's. */
+        async function followMode(m, was) {
+            if (settings.get('modeFollow') !== 'on' || !ctl || busy) return;
+            const c = drive.choice(m), last = favs.lastApplied();
+            let p = c.type === 'custom' ? c.program : c.type === 'default' ? (last ? last.program : null) : null;
+            busy = true;
+            try {
+                if (!p) { if (c.type === 'oem' && ctl.program) { await ctl.restoreOem(); say(drive.label(m) + ': BMW lighting', 2500); } return; }
+                if (m === 'sport' && was && settings.get('sportPulse') === 'on') p = { mode: 'pulse', then: p };
+                const r = await ctl.apply(p);
+                if (r.ok) say(drive.label(m) + ': ' + S.describe(still(p), ctl.slaves), 2500); else log.info('driving mode ' + m + ': not applied: ' + (r.reason || 'refused'));
+            } finally { busy = false; }
+        }
+        drive.on('mode', (m, was) => followMode(m, was).catch((e) => log.warn('driving mode: ' + e)));
 
         /* ---------- apply the last lighting at start (setting, off by default) ----------
          * The last configuration Apply sent is kept (favourites.json "last"); Restore OEM clears it. With the setting on,
@@ -97,13 +165,16 @@ mgu.run({
             const attempt = async () => {
                 autoApplyTimer = null;
                 if (ctl.program || busy) return;                   // the user got there first
+                // the car has not said whether it is in use yet: wait for it, never guess
+                if (drive && drive.stateAwaited() && ++tries < 20) { autoApplyTimer = setTimeout(attempt, 1500); return; }
+                if (drive && drive.stateAwaited()) { log.info('apply at start skipped: the car never said its state'); return; }
                 if (ctl.state !== 'connected') { if (++tries < 20) autoApplyTimer = setTimeout(attempt, 1500); return; }
                 const can = ctl.canControl();
                 if (!can.ok && /parking state unknown/.test(can.reason || '') && ++tries < 20) { autoApplyTimer = setTimeout(attempt, 1500); return; }
                 if (!can.ok) { log.info('apply at start skipped: ' + can.reason); return; }
                 busy = true;
                 try {
-                    const r = await ctl.apply(last.program);
+                    const r = await ctl.apply(settings.get('welcome') === 'on' && !S.isAnimated(last.program) ? { mode: 'welcome', then: last.program } : last.program);
                     if (r.ok) say('Last lighting applied: ' + S.describe(last.program, ctl.slaves), 3000); else log.info('apply at start refused: ' + (r.reason || 'refused'));
                 } finally { busy = false; }
             };
@@ -129,6 +200,8 @@ mgu.run({
             const mode = MODE_ORDER[draft.modes.mode];
             if (mode === 'solid') return Object.assign({}, draft.modes.params.solid, { mode: 'solid' });
             if (mode === 'dual') return dualProgram();
+            // the one-time effects end on what is applied now, else on the Colours page's colour
+            if (S.ONCE[mode]) return { mode, then: still(ctl.program) || { mode: 'solid', colour: rgbOf(draft.colours.hsv), brightness: draft.colours.brightness, zone: 'all' } };
             return Object.assign({}, draft.modes.params[mode], { mode });
         }
         const pageProgram = () => (page === 0 ? coloursProgram() : page === 1 ? dualProgram() : page === 2 ? modesProgram() : null);
@@ -151,6 +224,7 @@ mgu.run({
                 const r = await ctl.restoreOem();
                 say(r.ok ? 'OEM lighting restored' : 'Restore incomplete: ' + r.reason, r.ok ? 2500 : 6000);
                 favs.clearLast();                                   // Restore OEM is the off switch: nothing comes back at the next start
+                suspended = null;                                   // ...nor when the car is unlocked again
             } finally { busy = false; }
         }
         function cancelPage() {
@@ -166,9 +240,9 @@ mgu.run({
         };
 
         /* ---------- settings ---------- */
-        let linkKey = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency')].join('|');
+        let linkKey = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency'), settings.get('txMode'), settings.get('verify'), settings.get('refresh')].join('|');
         settings.onChange(async (key) => {
-            const now = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency')].join('|');
+            const now = [settings.get('backend'), settings.get('arm'), settings.get('unknownVariant'), settings.get('inflight'), settings.get('parked'), settings.get('simLatency'), settings.get('txMode'), settings.get('verify'), settings.get('refresh')].join('|');
             if (now !== linkKey) { linkKey = now; await makeController(); say('Lighting link: ' + ctl.kind); }
             if (key === 'refresh' || !key) ctl.refreshSeconds = Math.max(2, Math.min(254, Number(settings.get('refresh')) || 10));
             if (key === 'frame' || !key) ctl.frameMs = Number(settings.get('frame')) || 80;
@@ -194,8 +268,8 @@ mgu.run({
         ctx.ui.onClick('BTN_APPLY', () => { if (page <= 2) applyPage(); else say('Nothing to apply on this page', 1500); });
         ctx.ui.onClick('BTN_OEM', restoreOem);
         ctx.ui.onClick('BTN_PAGE', () => { editor.cancel(); page = (page + 1) % PAGES.length; deleteMode = false; });
-        if (ctx.app && ctx.app.on) ctx.app.on('shutdown', () => { if (autoApplyTimer) clearTimeout(autoApplyTimer); ctl.shutdown(); });
-        ctx.__ambient = { ctl: () => ctl, draft, editor, favs, page: () => page, setPage: (i) => { page = i; }, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
+        if (ctx.app && ctx.app.on) ctx.app.on('shutdown', () => { if (autoApplyTimer) clearTimeout(autoApplyTimer); clearInterval(gateTimer); oem.shutdown(); drive.shutdown(); ctl.shutdown(); });
+        ctx.__ambient = { ctl: () => ctl, oem, drive, factoryGate, gateTick, followMode, suspended: () => suspended, draft, editor, favs, page: () => page, setPage: (i) => { page = i; }, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
 
         /* ---------- drawing helpers ---------- */
         const linkPill = (cv, t, x, y, w) => {
@@ -330,24 +404,26 @@ mgu.run({
             breathing: [['minBrightness', 'Min %', 5, 0, 100], ['maxBrightness', 'Max %', 5, 0, 100], ['periodS', 'Seconds per breath', 1, 1, 30]],
             wave: [['periodS', 'Seconds per wave', 1, 2, 60], ['hueSpan', 'Hue span', 10, 10, 180], ['baseHue', 'Base hue', 10, 0, 350], ['brightness', 'Brightness %', 5, 0, 100]],
             solid: [['brightness', 'Brightness %', 5, 0, 100]],
-            dual: [],
+            dual: [], welcome: [], pulse: [],
         };
+        // the moving modes' speed step (1 slow, 2 normal, 3 fast), as Ambient Config has it
+        ['rainbow', 'fade', 'breathing', 'wave'].forEach((m) => MODE_PARAMS[m].push(['speed', 'Speed (1-3)', 1, 1, 3]));
         function drawModes(cv, t) {
             editor.reset();
             const d = draft.modes, mode = MODE_ORDER[d.mode], params = d.params[mode];
             G.panel(cv, t, 20, 60, 440, 452, 'Lighting mode');
             MODE_ORDER.forEach((m, i) => {
-                const y = 108 + i * 60, on = i === d.mode, applied = ctl.program && ctl.program.mode === m;
-                cv.roundRect(36, y, 408, 50, 12, on ? withAlpha(t.sel || t.accent, 0.25) : withAlpha('#ffffff', 0.05));
-                if (on) cv.strokeRoundRect(36, y, 408, 50, 12, 2, t.sel || t.accent);
-                cv.text(S.MODE_LABELS[m], 56, y + 32, 22, t.text, { font: 'bold' });
-                if (applied) G.pill(cv, t, 330, y + 10, 100, 30, 'ACTIVE', { color: t.accent, size: 13 });
-                cv.target(36, y, 408, 50, () => { d.mode = i; markDirty('modes'); }, 'mode:' + m);
+                const y = 112 + i * 49, on = i === d.mode, applied = ctl.program && ctl.program.mode === m;
+                cv.roundRect(36, y, 408, 43, 12, on ? withAlpha(t.sel || t.accent, 0.25) : withAlpha('#ffffff', 0.05));
+                if (on) cv.strokeRoundRect(36, y, 408, 43, 12, 2, t.sel || t.accent);
+                cv.text(S.MODE_LABELS[m], 56, y + 29, 21, t.text, { font: 'bold' });
+                if (applied) G.pill(cv, t, 330, y + 8, 100, 28, 'ACTIVE', { color: t.accent, size: 13 });
+                cv.target(36, y, 408, 43, () => { d.mode = i; markDirty('modes'); }, 'mode:' + m);
             });
             // the selected mode's settings
             const P = { x: 480, y: 60, w: 1100, h: 452 };
             G.panel(cv, t, P.x, P.y, P.w, P.h, S.MODE_LABELS[mode]);
-            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'All colours in turn, slowly.', fade: 'Glides from colour to colour through the palette, holding each.', breathing: 'The brightness rises and falls between the limits.', wave: 'A hue wave travelling from the dashboard to the rear.' }[mode];
+            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'All colours in turn, slowly.', fade: 'Glides from colour to colour through the palette, holding each.', breathing: 'The brightness rises and falls between the limits.', wave: 'A hue wave travelling from the dashboard to the rear.', welcome: 'Once: the lights come on from the dashboard to the rear, then stay on what is applied now.', pulse: 'Once: red for a moment, then back to what is applied now (the Sport greeting).' }[mode];
             cv.text(help, P.x + 24, P.y + 60, 17, t.dim);
             let px = P.x + 80, py = P.y + 120;
             (MODE_PARAMS[mode] || []).forEach((row) => {
@@ -378,7 +454,8 @@ mgu.run({
                 const rps = ctl.scheduler.stats.avgLatencyMs ? Math.round(1000 / (ctl.scheduler.stats.avgLatencyMs * Math.max(1, ctl.slaves.length))) : null;
                 cv.text('Needs a few frames a second across the cabin: ' + (rps == null ? 'throughput not measured yet' : 'about ' + rps + ' frames/s with this link') + (rps != null && rps < 2 ? ' (too slow for a smooth wave)' : ''), P.x + 24, P.y + 300, 15, rps != null && rps < 2 ? t.warn : t.dim);
             }
-            const sx = applyRow(cv, t, P.x + 24, P.y + 372, 50, S.isAnimated({ mode }) ? 'Start ' + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
+            if (S.ONCE[mode]) cv.text('Ends on: ' + (still(ctl.program) ? S.describe(still(ctl.program), ctl.slaves) : 'the Colours page colour'), P.x + 24, P.y + 300, 17, t.text);
+            const sx = applyRow(cv, t, P.x + 24, P.y + 372, 50, S.isAnimated({ mode }) ? (S.ONCE[mode] ? 'Run ' : 'Start ') + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
             G.button(cv, t, sx, P.y + 372, 0, 50, 'Save as preset', () => { const p = favs.addPreset(S.MODE_LABELS[mode] + ' ' + new Date().toISOString().slice(11, 16), modesProgram()); say('Saved ' + p.name); }, { key: 'savepreset' });
             linkPill(cv, t, P.x + 24, P.y + 432); statePill(cv, t, P.x + 204, P.y + 432, 260);
         }
@@ -417,6 +494,31 @@ mgu.run({
             G.button(cv, t, 1120, 456, 0, 44, 'Restore OEM', restoreOem, { key: 'oem', busy: busy || !ctl.program });
         }
 
+        /* ---------- DRIVING MODES ---------- */
+        function drawDriving(cv, t) {
+            editor.reset();
+            const follow = settings.get('modeFollow') === 'on';
+            G.panel(cv, t, 20, 60, 1560, 452, 'Lighting by driving mode');
+            cv.text(follow ? 'On: the lighting changes with the driving mode, when the car is parked and the factory lighting allows it.' : 'Off: the choices below are kept but nothing changes with the driving mode.', 44, 126, 17, follow ? t.text : t.dim);
+            const now = drive.mode();
+            drive.modes().forEach((m, i) => {
+                const y = 146 + i * 66, c = drive.choice(m), on = m === now;
+                cv.roundRect(36, y, 1528, 58, 12, on ? withAlpha(t.sel || t.accent, 0.22) : withAlpha('#ffffff', 0.05));
+                cv.text(drive.label(m), 56, y + 37, 23, t.text, { font: 'bold' });
+                if (on) G.pill(cv, t, 190, y + 14, 90, 30, 'NOW', { color: t.accent, size: 13 });
+                const what = c.type === 'custom' ? S.describe(c.program, ctl.slaves) : c.type === 'oem' ? 'BMW original lighting' : 'Your applied lighting (nothing special)';
+                cv.text(what.slice(0, 62), 300, y + 36, 18, c.type === 'default' ? t.dim : t.text);
+                let bx = 1010;
+                bx += G.button(cv, t, bx, y + 7, 0, 44, 'Use applied', () => { const p = still(ctl.program); if (!p) { say('Apply a lighting first, then store it here', 2500); return; } drive.setChoice(m, { type: 'custom', program: p }); say(drive.label(m) + ': ' + S.describe(p, ctl.slaves)); }, { key: 'dm:use:' + m, busy: !ctl.program }) + 8;
+                bx += G.button(cv, t, bx, y + 7, 0, 44, 'Default', () => { drive.setChoice(m, { type: 'default' }); }, { key: 'dm:def:' + m, color: c.type === 'default' ? t.accent : undefined }) + 8;
+                G.button(cv, t, bx, y + 7, 0, 44, 'BMW', () => { drive.setChoice(m, { type: 'oem' }); }, { key: 'dm:oem:' + m, color: c.type === 'oem' ? t.accent : undefined });
+            });
+            let bx = 36;
+            bx += G.button(cv, t, bx, 456, 0, 44, 'Follow driving mode: ' + (follow ? 'ON' : 'OFF'), () => { settings.set('modeFollow', follow ? 'off' : 'on'); }, { key: 'dm:follow', color: follow ? t.accent : undefined }) + 10;
+            bx += G.button(cv, t, bx, 456, 0, 44, 'Sport pulse: ' + (settings.get('sportPulse') === 'on' ? 'ON' : 'OFF'), () => { settings.set('sportPulse', settings.get('sportPulse') === 'on' ? 'off' : 'on'); }, { key: 'dm:pulse' }) + 10;
+            cv.text('The car says: ' + drive.summary()[1] + (drive.seen.length ? '   seen: ' + drive.seen.join(', ') : ''), bx + 10, 485, 15, t.dim);
+        }
+
         /* ---------- DIAGNOSTICS ---------- */
         function drawDiagnostics(cv, t) {
             editor.reset();
@@ -430,12 +532,16 @@ mgu.run({
                 ['Modules', s.slaves.length + ' (' + s.slaves.filter((m) => m.bus === 1).length + ' on bus 1, ' + s.slaves.filter((m) => m.bus === 2).length + ' on bus 2), ' + s.driven + ' driven'],
                 ['Applied', s.description],
                 ['Writes', (sc.writes || 0) + ' sent, ' + (sc.accepted || 0) + ' ok, ' + (sc.rejected || 0) + ' refused, ' + (sc.busy || 0) + ' busy, ' + (sc.timeouts || 0) + ' timeouts, ' + (sc.skipped || 0) + ' skipped'],
-                ['Transport', (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
-                ['Keep-alive', 'ZEIT ' + s.refreshSeconds + ' s, refresh at ' + Math.round(s.refreshSeconds * ctl.keepAliveFactor) + ' s; ' + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
+                ['Transport', (s.txMode === 'broadcast' ? (s.broadcastOk ? 'whole-bus writes (' + (s.stats.broadcasts || 0) + (s.deaf && s.deaf.length ? ', single for ' + s.deaf.join(' ') : '') + '), ' : 'whole-bus refused: single writes, ') : '') + (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
+                ['Keep-alive', 'ZEIT ' + s.holdSeconds + ' s, refresh at ' + Math.round(s.holdSeconds * ctl.keepAliveFactor) + ' s; ' + (s.verify ? (s.stats.confirmed || 0) + ' read back ok, ' + (s.stats.missed || 0) + ' missed; ' : '') + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
                 ['Animation', s.animated ? s.fps + ' frames/s, ' + s.stats.frames + ' frames, ' + s.stats.framesDropped + ' dropped' : 'none'],
                 ['Parking', s.parkedPolicy + (parked ? ', speed ' + (parked.speed() == null ? 'unknown' : Math.round(parked.speed()) + ' km/h') : ', no speed signal')],
+                ['Factory light', oem.summary()[0]],
+                ['Factory colour', oem.summary()[1]],
+                ['Car', drive.summary()[0] + '; mode ' + drive.summary()[1]],
+                ['Gate', s.gate || 'open'],
             ];
-            G.table(cv, t, 36, 100, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 30, size: 17 });
+            G.table(cv, t, 36, 100, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 22, size: 15 });
             G.panel(cv, t, 800, 60, 780, 452, 'Modules' + (s.slaves.length ? ' (' + s.slaves.length + ')' : ''));
             const sl = s.slaves.slice(0, 16).map((x) => { const tg = s.scene[x.bus + ':' + x.nad]; return [x.bus + ':' + x.nad, (x.location || '').slice(0, 40), tg ? C.rgbToHex(tg) + ' ' + tg.brightness + '%' : (x.driven ? 'releasing' : 'OEM') + (x.failures ? ' NRC' : '')]; });
             if (!sl.length) sl.push(['-', s.kind === 'bdc-uds' ? 'read 22 DA 5F / E3 D1 failed or no link' : 'none', '']);
@@ -458,7 +564,7 @@ mgu.run({
             if (ctl.program) badges.push({ text: (S.MODE_LABELS[ctl.program.mode] || 'CUSTOM').toUpperCase() });
             if (editor.editing) badges.push({ text: 'EDITING' });
             G.frame(cv, t, PAGES, page, badges);
-            try { [drawColours, drawDual, drawModes, drawFavourites, drawDiagnostics][page](cv, t); } catch (e) { log.error('draw page ' + page, e); }
+            try { [drawColours, drawDual, drawModes, drawFavourites, drawDiagnostics, drawDriving][page](cv, t); } catch (e) { log.error('draw page ' + page, e); }
             if (flash && Date.now() < flash.until) {
                 const w = Math.min(1500, cv.textWidth(flash.text, 20, { font: 'bold' }) + 60);
                 // over the page's title line, clear of the action rows at the bottom

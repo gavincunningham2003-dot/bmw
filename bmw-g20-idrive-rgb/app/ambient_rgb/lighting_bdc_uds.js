@@ -34,7 +34,7 @@ class BdcUdsLightingController extends LightingController {
         this.signals = o.signals || null;
         this.armed = !!o.armed;
         this.allowUnknownVariant = !!o.allowUnknownVariant;
-        this.maxSeconds = Math.min(60, o.maxSeconds || 30);
+        this.maxSeconds = Math.min(254, o.maxSeconds || 30);
         this.refreshSeconds = Math.min(this.refreshSeconds, this.maxSeconds);
         this.timeoutMs = o.timeoutMs || 3000;
         this.dryRuns = 0;
@@ -85,7 +85,8 @@ class BdcUdsLightingController extends LightingController {
         const st = await this._read(P.DID.LIN1_LAYERING_STATUS);
         if (st.ok) { caps.slaves = P.decodeLin1Status(st.data); this.slavesFromCar = true; caps.verified.lin1Status = true; } else caps.notes.push('22 DA 5F: ' + st.reason);
         const st2 = await this._read(P.DID.LIN2_LAYERING);
-        if (st2.ok) { const s2 = P.decodeLin2Status(st2.data); caps.slaves = caps.slaves.concat(s2); caps.verified.lin2Status = true; caps.lin2 = s2; } else caps.notes.push('22 E3 D1: ' + st2.reason);
+        if (st2.ok) { const s2 = P.decodeLin2Status(st2.data); caps.slaves = caps.slaves.concat(s2); this.slavesFromCar = true; caps.verified.lin2Status = true; caps.lin2 = s2; } else caps.notes.push('22 E3 D1: ' + st2.reason);
+        this.busRead = { 1: !!st.ok, 2: !!st2.ok };
         const pwm = await this._read(P.DID.INNENLICHT_PWM);
         if (pwm.ok) caps.pwm = P.decodePwmStatus(pwm.data);
         if (caps.rgbActuator !== 'documented' && caps.rgbActuator !== 'verified' && !this.allowUnknownVariant) caps.notes.push('writes disabled: body controller variant is ' + caps.rgbActuator + ' for the RGB layering actuator');
@@ -93,12 +94,26 @@ class BdcUdsLightingController extends LightingController {
         return caps;
     }
 
+    /**
+     * Both LIN buses, read and merged. A bus whose read fails keeps the modules last known for it (a refresh must
+     * never shrink the list to one bus); null only when neither bus answered. this.busRead says which bus the
+     * current list actually comes from the car for.
+     */
     async _readSlaves() {
-        const st = await this._read(P.DID.LIN1_LAYERING_STATUS);
-        if (!st.ok) return null;
         const known = this.slaves;
-        return P.decodeLin1Status(st.data).map((s) => Object.assign({}, known.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s));
+        const st = await this._read(P.DID.LIN1_LAYERING_STATUS);
+        const st2 = await this._read(P.DID.LIN2_LAYERING);
+        this.busRead = { 1: !!st.ok, 2: !!st2.ok };
+        if (!st.ok && !st2.ok) return null;
+        const merge = (list) => list.map((s) => Object.assign({}, known.find((k) => k.nad === s.nad && k.bus === s.bus) || {}, s));
+        const bus1 = st.ok ? merge(P.decodeLin1Status(st.data)) : known.filter((k) => k.bus === 1);
+        const bus2 = st2.ok ? merge(P.decodeLin2Status(st2.data)) : known.filter((k) => k.bus === 2);
+        this.slavesFromCar = true;
+        return bus1.concat(bus2);
     }
+
+    /** A dry run writes nothing, so there is nothing to read back. */
+    _canVerify() { return this.armed; }
 
     canControl() {
         const base = super.canControl();
