@@ -91,13 +91,15 @@ def real_sdk():
     if not (os.path.isfile(index) and os.path.isfile(pkg)):
         return None
     try:
-        version = json.load(open(pkg, encoding="utf-8")).get("version", "")
+        with open(pkg, encoding="utf-8") as f:
+            version = json.load(f).get("version", "")
     except ValueError:
         return None
     # a stand-in is a few bytes; the real bundle is about a megabyte and defines the app class
     if "placeholder" in version or os.path.getsize(index) < 100000:
         return None
-    head = open(index, encoding="utf-8", errors="replace").read()
+    with open(index, encoding="utf-8", errors="replace") as f:
+        head = f.read()
     return version if "OnlineApp" in head else None
 
 
@@ -105,7 +107,8 @@ def kit_build(spec, ci):
     """Run the kit's build for this app; returns the kit's staged tree (dist/<id>)."""
     if not os.path.isfile(os.path.join(KIT, "kit", "tools", "build.py")):
         die("the MGU App Kit is not at %s\n  git clone https://github.com/cauliflowermossgrape/idrive7-apps \"%s\"\n  (or set IDRIVE7_APPS to a checkout)" % (KIT, KIT))
-    build_py = open(os.path.join(KIT, "kit", "tools", "build.py"), encoding="utf-8").read()
+    with open(os.path.join(KIT, "kit", "tools", "build.py"), encoding="utf-8") as f:
+        build_py = f.read()
     if "mguAppStartType" not in build_py:
         die("the MGU App Kit at %s is too old for a background (autostart) app: update it\n  git -C \"%s\" pull --ff-only" % (KIT, KIT))
     sdk_dir = os.path.join(KIT, "oap-sdk")
