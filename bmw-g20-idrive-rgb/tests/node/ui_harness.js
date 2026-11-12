@@ -34,7 +34,7 @@ async function harness(opts) {
     (spec.settings || []).forEach((s) => { values[s.key] = s.default; });
     Object.assign(values, o.sets || {});
     const changeHandlers = [];
-    const settings = { get: (k) => values[k], set(k, v) { values[k] = v; changeHandlers.forEach((fn) => fn(k)); }, onChange: (fn) => changeHandlers.push(fn) };
+    const settings = o.settings || { get: (k) => values[k], set(k, v) { values[k] = v; changeHandlers.forEach((fn) => fn(k)); }, onChange: (fn) => changeHandlers.push(fn) };
     const clicks = {}, loops = {};
     let onTap = null, onTab = null, ccu = null, grabbed = null, last = null;
     const ui = {
@@ -43,7 +43,7 @@ async function harness(opts) {
         onClick: (n, fn) => { clicks[n] = fn; }, open: async () => {}, close: async () => {}, isVisible: () => true, onVisible: () => {},
     };
     const ctx = {
-        ui, settings, log, spec, dataDir, app: { on() {} },
+        ui, settings, log, spec, dataDir, app: { on() {} }, background: o.background || null,
         theme: () => themes.theme(values.theme),
         canvas: (w, h) => { const r = new Recorder(w, h); r.own = true; r.extra = 0; r.chrome = { tabs: null }; return r; },
         loop: (name, fps, fn) => { loops[name] = fn; return { stop() {}, kick() {} }; },

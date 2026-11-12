@@ -1,6 +1,6 @@
 # third-party research clones (cloned by clone_research.ps1; their own licences, not redistributed here)
 research/
-# build output, staged kit runtime, packages (the .mgu may carry a placeholder SDK; the real SDK is never redistributable)
+# build output, staged kit runtime, release packages (published as GitHub release assets, never committed; BMW's SDK is never in them)
 bmw-g20-idrive-rgb/build/
 bmw-g20-idrive-rgb/dist/
 bmw-g20-idrive-rgb/preview/

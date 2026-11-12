@@ -1,0 +1,96 @@
+# Builds and publishes the MGU Store release of Ambient RGB when a version tag is pushed
+# (bmw-g20-idrive-rgb/PUBLISHING.md). Nothing here touches a car.
+#
+#   git tag v0.5.0 && git push origin v0.5.0
+#
+# The packages contain no BMW code: BMW's oap-sdk is not redistributable and cannot exist on a build
+# machine. scripts/build_app.py --ci gives the kit's copy step an empty stand-in, removes it again and
+# then checks that nothing of an SDK is in either package (the head unit generates the module on install).
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create the release as a draft (MGU Store ignores drafts)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  KIT_REPO: https://github.com/cauliflowermossgrape/idrive7-apps
+  # the MGU App Kit commit the app was built and tested against (PUBLISHING.md)
+  KIT_REF: 64486c57a75830937951d73da05fd91294542867
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bmw-g20-idrive-rgb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: The MGU App Kit, at the pinned commit
+        working-directory: .
+        run: |
+          git init -q "$RUNNER_TEMP/idrive7-apps"
+          git -C "$RUNNER_TEMP/idrive7-apps" remote add origin "$KIT_REPO"
+          git -C "$RUNNER_TEMP/idrive7-apps" fetch -q --depth 1 origin "$KIT_REF"
+          git -C "$RUNNER_TEMP/idrive7-apps" checkout -q FETCH_HEAD
+          echo "IDRIVE7_APPS=$RUNNER_TEMP/idrive7-apps" >> "$GITHUB_ENV"
+
+      - name: The version, and that the tag is for it
+        id: version
+        run: |
+          version=$(node -p "require('./app/ambient_rgb/app.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME is not v$version (app/ambient_rgb/app.json)"; exit 1
+          fi
+
+      - name: Node tests
+        run: npm test
+
+      - name: Python tests
+        run: python -m unittest discover -s tests/python -p "test_*.py"
+
+      - name: Build and check the packages (no SDK inside)
+        run: python scripts/build_app.py --ci
+
+      - name: The build's own tests, on the packages just built
+        run: python -m unittest discover -s tests/python -p "test_build_app.py"
+
+      - name: Release notes from the changelog
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          {
+            echo "Ambient RGB $v for iDrive 7 (MGU). Install through MGU Store: add this repository as a source, Releases."
+            echo
+            echo "The packages contain no BMW code: the head unit generates the oap-sdk module when it installs them."
+            echo
+            awk -v v="$v" '$0 ~ "^## " v {on=1; next} on && /^## / {exit} on' CHANGELOG.md
+          } > "$RUNNER_TEMP/notes.md"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          draft=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.draft }}" = "true" ]; then draft="--draft"; fi
+          gh release create "v$v" \
+            "dist/ambient_rgb@$v.tgz" "dist/ambient_rgb@$v.mgu" dist/mgu-store.json dist/ambient_rgb.png \
+            --title "Ambient RGB $v" --notes-file "$RUNNER_TEMP/notes.md" $draft

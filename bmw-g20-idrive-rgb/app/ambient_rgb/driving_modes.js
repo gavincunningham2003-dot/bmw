@@ -115,16 +115,28 @@ class DrivingModes extends EventEmitter {
     /** A vehicle-condition status from the car. */
     condition(v) {
         const n = conditionOf(v && typeof v === 'object' ? v.statusConditionVehicle : v);
+        if (this.subs.condition && this.subs.condition.available) this._seenAvailable = true;
         if (n === undefined || n === this._condition) return;
         const was = this.away();
         this._condition = n;
+        this._conditionAt = Date.now();
         if (this.away() !== was) { this.log.info('vehicle state: ' + (this.away() ? 'locked or left' : 'in use') + ' (' + n + ')'); this.emit('away', this.away()); }
     }
 
     mode() { return this._mode; }
     raw() { return this._raw; }
-    /** true: parked or standby with nobody in it; false: in use; null: the car has not said. */
-    away() { return this._condition === null ? null : this._condition <= 3; }
+    /**
+     * true: parked or standby with nobody in it (1..3); false: in use; null: the car has not said, or the
+     * interface that said it is no longer available (a state heard before a disconnect is not trusted after it).
+     */
+    away() {
+        if (this._condition === null) return null;
+        const sub = this.subs.condition;
+        if (sub && !sub.error && sub.available === false && this._seenAvailable) return null;
+        return this._condition <= 3;
+    }
+    /** The raw vehicle condition (1..12) or null. */
+    conditionNumber() { return this._condition; }
     /** The state is expected (the interface answered) but has not arrived yet. */
     stateAwaited() { return !!this.subs.condition && !this.subs.condition.error && this._condition === null; }
     modes() { return KIND_MODES[this.kind]; }

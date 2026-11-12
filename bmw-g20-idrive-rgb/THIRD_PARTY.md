@@ -14,7 +14,10 @@ Parts of Ambient RGB 0.4.0 follow that app's design, and some tables and formula
 | `app/ambient_rgb/lighting_controller.js` (`verifyApplied`) | `lights.js` (`_check`) | reading the buses back after a still colour and rewriting a module that missed it |
 | `app/ambient_rgb/driving_modes.js` (`BY_NAME`, `BY_NUMBER`, `PHEV`, `modeOf`, `KIND_MODES`) | `ambient.js` | the driving-mode names, wire numbers and the plug-in hybrid detection |
 | `app/ambient_rgb/driving_modes.js` (`CONDITIONS`, `conditionOf`) | `kit/runtime/car.js` | the vehicle-condition numbers |
-| `app/ambient_rgb/main.js` (`COMFORT_SOCK`) | `others.js` | the check for IterioDev's Comfort service |
+| `app/ambient_rgb/lighting_service.js` (`COMFORT_SOCK`) | `others.js` | the check for IterioDev's Comfort service |
+| `app/ambient_rgb/car_signals.js` (0.5.0, read again at `64486c5`) | `main.js` (`TURN`, `TURN_NO`, `DOOR_FIELDS`, `DAY_NIGHT`) | which interfaces and fields carry the doors, the turn indicators and day / night, and which indicator values are a turn signal; each checked against this car's head-unit catalogue |
+| `app/ambient_rgb/lighting_overlay.js` (0.5.0) | `control.js` (`signals`, `blink`, `linesOf`) | the idea and the look of the effects: an open door's line blinking red, the indicator's side blinking green, door line only, fully on and fully dark, half brightness at night. The code is this project's own (its scene model, modules by location id) |
+| `app/ambient_rgb/main.js` (`background`), `lighting_service.js` (0.5.0) | `main.js` (`background`), `app.json` (`autostart`) | running from the platform's start without the screen; the 15 minutes without use for a car that does not say its state |
 
 Its licence, which applies to those parts:
 
@@ -51,6 +54,17 @@ is not part of this repository.
 Source: https://github.com/IterioDev/car-apps. Read for behaviour only (zones by what the car has, factory
 priority, the lock-and-leave problem its issue 17 describes). **None of its source is in this repository**; its
 licence does not allow that.
+
+0.5.0 uses one fact read from `tools/iteriodev-comfort/comfort.js`: the factory ambient lighting's on / off
+state is byte 7 of the event 0x8003 of service 0xB512, on when it is 1. That is a fact about BMW's interface,
+not code; `app/ambient_rgb/oem_lighting.js` reads the same field by its catalogue name through the kit's
+signals module, and its implementation is this project's own.
+
+## MGU Store (publishing rules only)
+
+Source: https://github.com/robertnisipeanu/mgu-store, `docs/PUBLISHING.md` and `deploy/README.md` (read at
+`181a936` and its current `main`, 2026-11-12). Only its documented package rules are followed (asset names,
+`mguHmi`, `mguAppStartType`, no SDK in a release); none of its code is in this repository.
 
 ## BMW
 

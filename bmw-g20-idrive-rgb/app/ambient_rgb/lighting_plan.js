@@ -34,7 +34,7 @@ function plan(scene, modules, last, opts) {
     const params = o.params || ((t) => Object.assign({ active: true }, t));
     const force = o.force || new Set();
     const deaf = o.deaf || new Set();
-    const due = (k, p) => { const l = last && last.get(k); return !!o.all || force.has(k) || !l || !l.ok || !same(l.params, p); };
+    const due = (k, p) => { const l = last && last.get(k); return !!o.all || force.has(k) || !l || !(l.ok || l.unanswered) || !same(l.params, p); };
     const out = [];
     const buses = Array.from(new Set(modules.map((m) => m.bus))).sort();
     buses.forEach((bus) => {

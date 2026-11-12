@@ -9,7 +9,27 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Node (121 tests, all passing)
+## Results, 0.5.0 (2026-11-12, Windows 11, Node 24, Python 3.12, kit `64486c5`)
+
+```
+npm test          TOTAL: 166 passed, 0 failed
+npm run test:py   Ran 37 tests ... OK
+python scripts/build_app.py
+                  OK: ambient_rgb@0.5.0 passed every check (iDrive 7, autostart, no SDK inside)
+```
+
+New in 0.5.0:
+
+| File | Covers |
+|---|---|
+| `tests/node/test_v050.js` (45) | **Factory ambient OFF**: `factoryOn()` on the catalogue field and values (off wins; unfilled, never received and a lost provider are unknown, never on), the wire layout IterioDev reads, an immediate release with the screen closed, nothing re-applied when it comes back on unless the setting is on, the *Keep custom lighting* setting. **Parked / locked**: states 1, 2 and 3 each release and 5, 7, 8, 10, 12 do not; an animation and the keep-alives stop and nothing at all is written afterwards; unlock with and without *resume*; Restore OEM as the off switch. **Signal loss**: no vehicle state (15 minutes after the last sign of use, then a lapse with no write, not even a release), the state's provider going away, the factory state missing or lost, the keep-alive asking the gate itself, the simulator's exemption. **Background and shutdown**: first-install defaults; the service running with no screen (last lighting at start, animation, door flash, gate); `main.js` background start, the screen reusing the one service, the platform's shutdown (released, timers cleared, subscriptions closed, nothing written after); shutdown mid-effect and with a dead transport; a link setting replacing the controller cleanly. **Door flash**: decoding of the four switches; off by default; each door flashes its own line and only that, stops at once, colour back; several doors; over an animation without touching its phase or re-applying it; over the factory lighting with the module handed back; the module from the location table on another layout; only interior door contour lines through the allow-listed write; stops when the car is left, when switched off, and after five minutes; released with the factory switch. **Indicators**: decoding (lock and alarm flashes are not a turn signal), right-hand-drive mapping, hazards, left-hand drive mirrored, off by default and off again, red over green, a lost provider. **Night dimming.** **Command sending**: an unanswered write is sent once (scheduler, repeated set, frame, planner); busy retries 0 / 1 / 3 and a refused transport as busy; the maximum command duration; the controller's unanswered accounting and keep-alive; a read-back leaving a module that did take it alone; a whole-bus write without a reply not fanned out; three unanswered in a row stop control; whole-bus preferred, never over a module left to BMW, repaired by read-back; the real `kit/diag.js` path with one request in flight and the kit's hidden retries off. **Screen**: the three effect switches on and off again; every page's controls on the screen and not overlapping; every mode a knob target with its speed step. |
+| `tests/python/test_build_app.py` (13) | what counts as a real SDK (a placeholder, an empty stub and a few bytes do not); a build without it stops with the steps and leaves nothing behind; an old kit is refused; the built packages pass; identity and metadata (`ambient_rgb`, version, `mguHmi ["ID7"]`, `autostart`, entry point, the new modules, no SDK, `oapgen`); tampered copies are refused (an SDK inside either archive, a missing or changed module, wrong version, missing or wrong `mguHmi`, missing start type, missing entry point, a setter asked for); no interface is asked for write access; the packed entry point loads and starts safe. The package tests are skipped when `dist/` is empty. |
+
+Also run by hand for 0.5.0: every page rendered at 1600 x 520 from the harness and looked at (the overlaps
+found are in the changelog), and in the kit's live emulator (`npm run emu`) the knob walked the Modes list to
+its last row (Sport Pulse) and selected it.
+
+## Node (166 tests, all passing; the table below is the 121 from 0.4.0)
 
 | File | Covers |
 |---|---|
@@ -24,7 +44,7 @@ npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a 
 | `test_v040.js` (27) | **the planner** (uniform cabin = 2 writes, mixed colours = whole bus then the exceptions, never NAD 0 on a bus with a module left to the car, never when it saves nothing, releases); **the controller with whole-bus writes** (solid in 2 writes with all 19 showing it, dual correct with fewer writes, zones untouched, a car that refuses NAD 0 falls back for good, rainbow frames of 2 writes); **Welcome Sweep and Sport Pulse** (shape, run once, follow-on or the car's lighting), the speed steps, hold times, read-back; **the gate** (no apply, no renewals); **both buses on a refresh** with either failing; 13 modules on one bus; **driving modes** (names, wire numbers, plug-in hybrid, choices kept, the car's state); **the app** (following off by default, the mode's program, BMW original, the pulse; locked or left releases and blocks; factory lighting off; another controller; the Driving page) |
 | `test_ui.js` (12) | `main.js` through the harness: every page draws; **preview only** (taps on the hue ring and the dial change the draft, zero writes, Apply writes); **the rotary flow** (enter the ring, 10 clicks = 30°, press confirms and applies, enter the dial, turn, tilt left cancels back to the entered value with the car unchanged); the setting off (only Apply applies); Dual (taps, swap, copy, Apply both drives upper and lower differently, handle follows the lower group, save combination); Modes (Rainbow with its speed, Start, Breathing, Restore stops cleanly); zones from the Colours page keep other zones; Favourites (colours and configurations, apply, delete); Cancel discards; Diagnostics; switching the link to the car without a transport refuses Apply; **apply at start** (off by default, the last applied lighting comes back with the setting on, Restore OEM clears it) |
 
-## Python (24 tests, all passing)
+## Python (37 tests, all passing: these 24 and the 13 of `test_build_app.py` above)
 
 Unchanged by this upgrade: HSFZ framing, UDS decoders (the car's records), the read-only policy and
 redaction, scans against the loopback simulated car (pending, busy, two buses), the catalog search.

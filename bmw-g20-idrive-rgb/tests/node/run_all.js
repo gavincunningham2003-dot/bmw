@@ -4,7 +4,7 @@
  *   node scripts/stage.js && node tests/node/run_all.js
  */
 const path = require('path');
-const files = ['test_colour', 'test_protocol', 'test_scene', 'test_scheduler', 'test_controller', 'test_bdc_uds', 'test_favourites', 'test_oem_lighting', 'test_v040', 'test_ui'];
+const files = ['test_colour', 'test_protocol', 'test_scene', 'test_scheduler', 'test_controller', 'test_bdc_uds', 'test_favourites', 'test_oem_lighting', 'test_v040', 'test_v050', 'test_ui'];
 (async () => {
     let fail = 0, pass = 0;
     for (const f of files) {

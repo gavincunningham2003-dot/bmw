@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.5.0 (2026-11-12)
+
+Factory lighting shutdown, background running, door and indicator effects, command-sending rules, and a real
+MGU Store release. Everything below runs in simulation and in the emulator. **Nothing in 0.5.0 has run on the
+car**: [UNVERIFIED.md](UNVERIFIED.md) lists what the car still has to confirm.
+
+### Factory lighting shutdown (fixed)
+
+- **The factory ambient ON / OFF switch is now read properly.** `oem_lighting.js` gained `factoryOn()`: the
+  field IterioDev's Comfort service reads (service 0xB512, event 0x8003, payload byte 7), checked against this
+  head unit's catalogue as `statusModeAmbientePanoramicRoofInteriorLighting` (AUS 0, EIN 1, unfilled 3), plus
+  the menu value `AMBIENTEBELEUCHTUNG_AUS` and `AmbientLight.ambientLightActive`. Off from any of them is off.
+  Switching the factory lighting off releases every module at once (on the signal, not at the next 1.5 s look).
+- **Unknown is no longer treated as "on".** Before, a signal that never arrived left the lighting running.
+  Now a missing, unfilled or disconnected signal stops the renewals and animations and sends nothing more (not
+  even a release): the modules return to the factory lighting when their time runs out. New controller call
+  `lapse()`.
+- **Parked and left (VehicleCondition 1, 2, 3)** releases as before; the animation ticker now asks the gate
+  before every frame as well (before, only the keep-alive and the 1.5 s look did).
+- **No vehicle state at all:** the car counts as in use only while something shows it (it moved, or the
+  screen was used) and for 15 minutes after; then the lights are left to lapse.
+- **A state heard before its provider went away is not believed afterwards.**
+- **Factory lighting back on / car unlocked:** nothing is re-applied unless the setting *Lighting back when
+  the car or the factory lighting returns* is on (renamed; off by default as before).
+- On the simulated BDC unknown signals do not stop the lighting (there is no car to keep awake); known ones do.
+
+### Background running (new)
+
+- **`lighting_service.js`**: the link, the factory gate, the effects, the driving modes, the last lighting at
+  start and the shutdown moved out of the screen code into one service per process. `main.js` is now the
+  screen only.
+- **`"autostart": true`** in `app.json` and a background start in `main.js` (`impl.background`, MGU App Kit
+  `64486c5` or later): the platform starts the app itself and the lighting runs with the screen closed.
+  Opening the screen reuses the running service (one controller, one set of timers and listeners).
+- **Shutdown:** the platform's shutdown request and SIGTERM stop the effects and animations, clear the timers,
+  attempt `restoreOem()` and close every subscription.
+- First-install defaults are unchanged: Simulated BDC, Disarmed, nothing applied at start.
+
+### Effects over the lighting (new, each off until switched on)
+
+- **Open door red flash** (setting of that name): the open door's interior contour line blinks red, all four
+  doors separately and together, stops the moment the door closes, and the applied colour or animation carries
+  on in step. The module comes from the body controller's location table. Stops when the car is left, and by
+  itself after five minutes of one door state. `car_signals.js`, `lighting_overlay.js`.
+- **Turn indicator green glow**: that side's door contour lines blink green; hazards light both sides.
+  Right-hand drive by default (left indicator = passenger side); setting *Steering wheel side*.
+- **Dim at night**: half brightness while the car reports night.
+- All three have switches on the Driving page as well as in Settings, and can be switched off again there.
+- Sport pulse is unchanged (off by default, on a decoded driving-mode change). No redline pulse: there is no
+  verified signal for it.
+
+### Command sending
+
+- **A write that gets no reply is never sent again for that reason.** It is recorded as unanswered and counted
+  as written; the module is next written when its target changes or its keep-alive is due. Before, the next
+  keep-alive look (and a whole-bus write's fallback) resent it.
+- **A whole-bus write without a reply** no longer switches whole-bus mode off and no longer fans out into
+  single writes. Only a refusal (a negative reply) does. A read-back, where possible, settles it.
+- **Three writes in a row without a reply** stop custom control with a message.
+- **Busy retries are a setting** (*Retries when the car says busy*: 0, 1, 2, 3, 5; default 3). The kit's own
+  hidden transport retries (four, 1 to 4 s apart) are switched off so the count is the real one.
+- **A maximum duration for one command** (5 s) in the scheduler and on the transport call.
+- The apply result and the screen message now say how many writes were refused, unanswered or repaired.
+- Effect frames are paced by the writes they need (two, not nineteen), so a door line blinks on time.
+- One request in flight stays the default; the two-in-flight setting is labelled as not verified.
+
+### MGU Store release
+
+- **`scripts/build_app.py` rewritten.** It builds with the kit's own build, removes BMW's SDK from the tree,
+  adds `"mguHmi": ["ID7"]`, packs `ambient_rgb@<version>.tgz` and `.mgu` reproducibly, and checks both archives
+  (structure, identity, entry point, every module byte for byte, no SDK, no write access asked, the head
+  unit's interface catalogue when present, and a load of the packed entry point). Packages that fail are
+  removed. **The placeholder-SDK build is gone**: without the real SDK it stops with the steps to extract it.
+- `scripts/check_package.js`, `scripts/release.ps1`, `.github/workflows/release.yml`, [PUBLISHING.md](PUBLISHING.md).
+
+### Screen fixes found by the new overlap test
+
+- Colours: the mode list ran off the bottom of its panel (Favourites was cut off) and its first row sat on the
+  panel title; *Save colour* touched the first library colour.
+- Modes: the status pills were cut off at the bottom edge; the colour swatch's caption overlapped its value.
+- Dual: the status text ran off the right edge. Diagnostics: the pills crossed into the Modules panel and the
+  last module row sat on the "more" note. Favourites: the first row sat on the panel titles.
+
+### Tests
+
+166 Node tests (45 new in `tests/node/test_v050.js`) and 37 Python tests (13 new in
+`tests/python/test_build_app.py`), all passing. See [TESTS.md](TESTS.md).
+
 ## 0.4.0 (2026-11-12)
 
 Built against the 0.4.0 specification. Everything below runs in simulation and in the emulator; the column

@@ -38,7 +38,7 @@ test('apply(solid) writes every module once with the colour and ZEIT, reports th
     const { c, clock } = make();
     await c.connect();
     const r = await c.apply(SOLID);
-    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, released: 0 });
+    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0 });
     assert.strictEqual(writes(c).length, 19);
     assert.deepStrictEqual(writes(c)[0].data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 0, 10]);
     assert.deepStrictEqual(phys(c, '2:1'), [254, 0, 0, 100, 'custom']);

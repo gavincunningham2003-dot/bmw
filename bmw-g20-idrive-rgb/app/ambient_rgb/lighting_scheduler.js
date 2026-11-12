@@ -14,7 +14,14 @@
  *     could not keep up with is dropped whole, never half-written late (obsolete frames)
  *   - priorities: 'release' (hand modules back) > 'apply' (a confirmed configuration) > 'frame' (animation)
  *   - unchanged targets are skipped unless `force` (the keep-alive forces a refresh before ZEIT lapses)
- *   - NRC 21 busy: the item goes back on the queue after a growing pause; rejects and timeouts are counted per key
+ *   - BUSY (NRC 21 from the BDC, or the transport turning the request away before it was sent): the item goes back
+ *     on the queue after a growing pause, at most maxBusyRetries times (0 = never); a refusal is counted and reported
+ *   - NO REPLY is never a reason to send again. A write that got no answer may well have been taken, so it is
+ *     recorded as 'unanswered' (last.unanswered) and counted as written for the purpose of not repeating it: the
+ *     module is next written when its target changes or when its keep-alive is due anyway. Whether it took is for
+ *     the controller's read-back to say.
+ *   - maxCommandMs: no single write is waited for longer than this, whatever the transport does (it then counts as
+ *     unanswered), so one stuck request cannot hold the queue
  *   - pause()/resume() for a lost transport; clear() drops everything queued; drain() resolves when nothing is
  *     queued or in flight (restoreOem waits for it, so "released" is only reported once it is true)
  *   - stats for the diagnostics page: writes, accepted, rejected, busy, timeouts, dropped, latency, writes per second
@@ -29,7 +36,7 @@ const PRIO = Object.freeze({ release: 0, apply: 1, frame: 2 });
 class WriteScheduler extends EventEmitter {
     /**
      * opts.writer(slave, params) -> Promise<{ ok, nrc?, reason?, bytes? }>   the transport (kit/diag.js physical() behind it)
-     * opts.maxInFlight (1), opts.minGapMs (0), opts.busyBackoffMs (200), opts.maxBusyRetries (3), opts.perBusOrder (true)
+     * opts.maxInFlight (1), opts.minGapMs (0), opts.busyBackoffMs (200), opts.maxBusyRetries (3; 0 = no retry), opts.maxCommandMs (5000)
      * opts.now / setTimeout / clearTimeout for tests
      */
     constructor(opts) {
@@ -40,7 +47,8 @@ class WriteScheduler extends EventEmitter {
         this.maxInFlight = Math.max(1, o.maxInFlight || 1);
         this.minGapMs = o.minGapMs || 0;
         this.busyBackoffMs = o.busyBackoffMs == null ? 200 : o.busyBackoffMs;
-        this.maxBusyRetries = o.maxBusyRetries == null ? 3 : o.maxBusyRetries;
+        this.maxBusyRetries = o.maxBusyRetries == null ? 3 : Math.max(0, Math.min(10, Number(o.maxBusyRetries) || 0));
+        this.maxCommandMs = Math.max(250, o.maxCommandMs || 5000);
         this.log = o.log || { info() {}, warn() {}, error() {} };
         this._setTimeout = o.setTimeout || setTimeout;
         this._clearTimeout = o.clearTimeout || clearTimeout;
@@ -54,7 +62,7 @@ class WriteScheduler extends EventEmitter {
         this._timer = null;
         this._drains = [];
         this._lastSendAt = null;
-        this.stats = { writes: 0, accepted: 0, rejected: 0, busy: 0, timeouts: 0, dropped: 0, skipped: 0, latencyMs: null, avgLatencyMs: null, writesPerSec: 0 };
+        this.stats = { writes: 0, accepted: 0, rejected: 0, busy: 0, busyGivenUp: 0, timeouts: 0, dropped: 0, skipped: 0, latencyMs: null, avgLatencyMs: null, writesPerSec: 0 };
         this._window = [];                 // send times of the last few seconds, for writes per second
     }
 
@@ -73,7 +81,8 @@ class WriteScheduler extends EventEmitter {
     }
     /** One module's next target. prio: 'release' | 'apply' | 'frame'. force: write even if unchanged (keep-alive). */
     set(key, slave, params, prio, force) {
-        if (!this._same(params, (this.last.get(key) || {}).params) || force || !(this.last.get(key) || {}).ok) this._put(key, slave, params, prio || 'apply', force);
+        const l = this.last.get(key) || {};
+        if (!this._same(params, l.params) || force || !(l.ok || l.unanswered)) this._put(key, slave, params, prio || 'apply', force);
         else this.stats.skipped++;
         this._pump();
     }
@@ -89,7 +98,7 @@ class WriteScheduler extends EventEmitter {
         const force = new Set(forceKeys || []);
         targets.forEach((t) => {
             const lastOk = (this.last.get(t.key) || {});
-            if (force.has(t.key) || !lastOk.ok || !this._same(t.params, lastOk.params)) this._put(t.key, t.slave, t.params, 'frame', force.has(t.key), id);
+            if (force.has(t.key) || !(lastOk.ok || lastOk.unanswered) || !this._same(t.params, lastOk.params)) this._put(t.key, t.slave, t.params, 'frame', force.has(t.key), id);
             else this.stats.skipped++;
         });
         this._pump();
@@ -158,7 +167,11 @@ class WriteScheduler extends EventEmitter {
         while (this._window.length && this._window[0] < t0 - 5000) this._window.shift();
         this.stats.writesPerSec = Math.round(this._window.length / 5 * 10) / 10;
         let r;
-        try { r = await this.writer(it.slave, it.params); } catch (e) { r = { ok: false, reason: String(e && e.message || e) }; }
+        // (the safe maximum duration of one command: past it the write counts as unanswered and the queue moves on)
+        let watchdog = null;
+        const late = new Promise((resolve) => { watchdog = this._setTimeout(() => { watchdog = null; resolve({ ok: false, reason: 'timeout', late: true }); }, this.maxCommandMs); });
+        try { r = await Promise.race([Promise.resolve().then(() => this.writer(it.slave, it.params)), late]); } catch (e) { r = { ok: false, reason: String(e && e.message || e) }; }
+        if (watchdog) this._clearTimeout(watchdog);
         const dt = this._now() - t0;
         this.stats.latencyMs = dt;
         this.stats.avgLatencyMs = this.stats.avgLatencyMs == null ? dt : Math.round(this.stats.avgLatencyMs * 0.8 + dt * 0.2);
@@ -167,15 +180,21 @@ class WriteScheduler extends EventEmitter {
             this.stats.accepted++;
             this.last.set(it.key, { params: it.params, at: this._now(), ok: true });
             this.emit('written', it.key, it.params, r);
-        } else if (r && r.nrc === 0x21 && it.retries < this.maxBusyRetries) {
+        } else if (r && (r.nrc === 0x21 || r.busy) && it.retries < this.maxBusyRetries) {
             this.stats.busy++;
             it.retries++;
             it.notBefore = this._now() + this.busyBackoffMs * it.retries;
             if (!this.queue.has(it.key)) this.queue.set(it.key, it);        // a newer target meanwhile wins
             this.emit('busy', it.key, it.retries);
+        } else if (r && (r.reason === 'timeout' || r.reason === 'no reply')) {
+            // no answer: NOT sent again. It may have been taken; the keep-alive (or a changed target) writes it next.
+            this.stats.timeouts++;
+            this.last.set(it.key, { params: it.params, at: this._now(), ok: false, unanswered: true, reason: 'timeout' });
+            this.emit('unanswered', it.key, it.params, r);
         } else {
-            if (r && (r.reason === 'timeout' || r.reason === 'no reply')) this.stats.timeouts++; else this.stats.rejected++;
-            this.last.set(it.key, { params: it.params, at: this._now(), ok: false, nrc: r && r.nrc, reason: r && r.reason });
+            if (r && (r.nrc === 0x21 || r.busy)) this.stats.busyGivenUp++;
+            this.stats.rejected++;
+            this.last.set(it.key, { params: it.params, at: this._now(), ok: false, nrc: r && r.nrc, reason: (r && r.reason) || (r && r.busy ? 'busy' : undefined) });
             this.emit('failed', it.key, it.params, r || { ok: false, reason: 'no result' });
         }
         this._settleDrains();
@@ -184,7 +203,7 @@ class WriteScheduler extends EventEmitter {
 
     /** Snapshot for the diagnostics page. */
     status() {
-        return Object.assign({}, this.stats, { queued: this.queue.size, inFlight: this.inFlight.size, paused: this.paused, maxInFlight: this.maxInFlight, known: this.last.size });
+        return Object.assign({}, this.stats, { queued: this.queue.size, inFlight: this.inFlight.size, paused: this.paused, maxInFlight: this.maxInFlight, maxBusyRetries: this.maxBusyRetries, maxCommandMs: this.maxCommandMs, known: this.last.size });
     }
 }
 

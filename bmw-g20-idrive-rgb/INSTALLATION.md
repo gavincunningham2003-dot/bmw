@@ -43,8 +43,11 @@ The build needs BMW's `oap-sdk`, which is inside every BMW app on the unit and m
    node ..\research\cauliflowermossgrape_idrive7-apps\kit\tools\extract_sdk.js x_call\javascript\app.js ..\research\cauliflowermossgrape_idrive7-apps\oap-sdk
    ```
    `oap-sdk/` is gitignored in the kit. Never commit it, never publish a `.mgu` that contains it.
-2. Build this app with the real SDK: `python scripts/build_app.py` → `dist/ambient_rgb@<version>.mgu`
-   (no `dist/PLACEHOLDER_SDK.txt` marker any more: the package is installable).
+2. Build this app: `python scripts/build_app.py` → `dist/ambient_rgb@<version>.tgz` and `.mgu`, checked. These
+   are the **MGU Store release packages** (part H): the SDK is used for the build and is NOT inside them (the
+   Store generates it on the head unit). Without the SDK the script stops and builds nothing. The kit's own
+   `dist\ambient_rgb@<version>.mgu` in the kit checkout is the copy WITH your SDK inside, for the kit's
+   installer in part D only: never publish or share that one.
 3. Optional but worth it: `scp` the unit's `/etc/oap/someip/someip-interfaces.json` and run the kit's
    `kit/tools/check_signals.py` against it, so `app.json`'s signal flags are validated before the
    installer sees them (the app's FrontCCU and Vehicle2 entries are marked optional, so a unit without
@@ -110,3 +113,81 @@ Everything new in 0.4.0 is off or on its safe value after an install. Switch thi
 
 Build, test and install commands are unchanged: `npm test`, `npm run test:py`, `python scripts/build_app.py`,
 then part D.
+
+## H. 0.5.0: install through MGU Store (the preferred way)
+
+[MGU Store](https://github.com/robertnisipeanu/mgu-store) is an app on the head unit that installs other apps
+from GitHub releases. This is the way that gives the app its **background start** (the Store's installer lists
+it with `appStartType: autostart`; the kit's installer in part D lists every app as `manually`).
+
+Before any of this: the head unit must be coded again (its apps do not start otherwise) and the Store must be
+installed (its own README, `node deploy\mgu-install.js first-install`). Both are your own steps on the car;
+nothing in this repository does them.
+
+### H1. Publish the release (laptop, PowerShell, from `bmw-g20-idrive-rgb`)
+
+[PUBLISHING.md](PUBLISHING.md) has the detail. In short, with the version in `app/ambient_rgb/app.json`
+committed on `main`:
+
+```powershell
+git tag v0.5.0
+```
+
+```powershell
+git push origin main v0.5.0
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1
+```
+
+### H2. Add the source on the car (once)
+
+1. The repository is private: give the Store an account that can read it. Store → Settings → **Accounts** →
+   **Add token** (a fine-grained GitHub token for this repository only, **Contents: Read-only**), or
+   **Sign in with GitHub**. Typing is easier from the Store's phone page (Settings → **Phone access**).
+2. Store → Settings → **Add source** → `gavincunningham2003-dot/bmw` → **Releases**.
+3. Store → Settings → **Check now**. **Ambient RGB 0.5.0** appears in the list.
+
+No internet in the car: copy `dist\ambient_rgb@0.5.0.tgz` into a folder named `oap` on a USB stick, plug it in,
+and use the Store's **USB** tab instead of steps 1 to 3.
+
+### H3. Install
+
+1. Car parked, ignition on. Store → **Ambient RGB** → **Install** (or **Update**: the Store recognises the
+   0.3.0 the kit's installer put there and updates it in place, keeping its data folder).
+2. Wait for the Store to say it is installed (the app platform restarts once; a minute or two).
+3. The app starts by itself from now on. It is on **Simulated BDC** and **Disarmed**, with every effect off:
+   nothing is written to the car until you change that. Open it and go through part E, then part G, then:
+4. **0.5.0 checks, one at a time, parked** (each is an item of [UNVERIFIED.md](UNVERIFIED.md)):
+   - Diagnostics → **Factory light** and **Car**: they must show values (`on`, `in use (5)`), not
+     "not reachable". If Factory light stays unknown, the app will refuse to apply: that is the safe
+     behaviour; note what it shows before switching *Factory ambient lighting off* to *Keep custom lighting*.
+   - Apply a colour, close the app (HOME): the colour must stay. Switch the factory ambient lighting off in
+     iDrive: it must release at once. Switch it on again: the factory colour must stay.
+   - Apply again, lock the car and walk away: released within seconds. Check the car goes to sleep as usual.
+   - Driving page → **Open door red flash: ON**, open each door in turn: that door's line, red, and back.
+   - **Indicator glow: ON** (parked, ignition on, indicate left and right): the side must match; if it is
+     mirrored, set *Steering wheel side* in Settings.
+   - Switch any of them off again on the same page: the effect must stop at once.
+
+### H4. Uninstall, or go back to the previous version
+
+- **Stop the lights now:** the app's **Restore OEM** button. Nothing persists in the body controller; even
+  with the app killed, every module returns to the factory lighting within the hold time (10 s by default).
+- **Remove the app:** Store → **Ambient RGB** → **Remove**. Its settings and saved colours go with it.
+- **Back to the previous version**, on the unit as root (over SSH), with the Store's deploy tool:
+  ```
+  mgu-deploy.sh status --json
+  ```
+  shows the app's `previous` (the older package the Store kept when it updated; it keeps the installed
+  version and the newest older one only). If there is one:
+  ```
+  mgu-deploy.sh rollback ambient_rgb --yes
+  ```
+  uninstalls the app and installs that kept package, carrying the data folder over. These two commands are
+  the Store's documented ones (its `deploy/README.md`, "Rollback"); they have not been run on this car.
+- **Back to a version of your choice:** remove the app (above), then install that version's package: from a
+  GitHub release of it (delete or draft the newer releases first: the newest version of an id always wins), or
+  from a USB stick's `oap` folder. The Store never installs a lower version over a higher one.
+- **Everything back to stock:** part F (the kit's `restore`) and the Store's own README ("Uninstall").

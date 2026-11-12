@@ -42,8 +42,8 @@ Rendered by the head unit's own draw engine, as it looks on the car.
 
 ```
 cd bmw-g20-idrive-rgb
-npm test            # 121 Node tests
-npm run test:py     # 24 Python tests
+npm test            # 166 Node tests
+npm run test:py     # 37 Python tests
 npm run emu         # the head unit emulator at http://localhost:8077: mouse = touch, mouse wheel = knob
 ```
 

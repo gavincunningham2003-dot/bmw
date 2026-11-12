@@ -81,7 +81,7 @@ test('broadcast: a solid colour is 2 writes and every module shows it; Restore O
     const { c } = make({}, { txMode: 'broadcast' });
     await c.connect();
     const r = await c.apply(RED);
-    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, released: 0, confirmed: 19, missed: 0 });
+    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0, confirmed: 19, missed: 0 });
     assert.deepStrictEqual(nads(c), ['1:0', '2:0']);
     assert.deepStrictEqual(writes(c)[0].data, [0xDA, 0x5E, 0, 1, 100, 254, 0, 0, 10]);
     c.slaves.forEach((s) => assert.deepStrictEqual(phys(c, s.bus + ':' + s.nad), [254, 0, 0, 100, 'custom']));
@@ -367,7 +367,7 @@ test('the app: another lighting controller on the head unit: writes refused unle
         await ctl.restoreOem();
     } finally { delete process.env.AMBIENT_RGB_COMFORT_SOCK; }
 });
-test('the app: the Driving page and the two one-time modes draw; version 0.4.0; the new signals are read-only and optional', async () => {
+test('the app: the Driving page and the two one-time modes draw; the version; the new signals are read-only and optional', async () => {
     const h = await harness({});
     h.app.setPage(5);
     let cv = await h.frame();
@@ -381,7 +381,7 @@ test('the app: the Driving page and the two one-time modes draw; version 0.4.0; 
     await h.press('mode:welcome');
     assert.strictEqual(h.app.modesProgram().mode, 'welcome');
     assert.ok(cv);
-    assert.strictEqual(h.ctx.spec.version, '0.4.0');
+    assert.strictEqual(h.ctx.spec.version, '0.5.0');
     ['de.bmw.infotainment.drivingexcitement.FES', 'de.bmw.infrastructure.VehicleCondition'].forEach((i) => {
         const s = h.ctx.spec.signals[i];
         assert.ok(s && s._optional, i);

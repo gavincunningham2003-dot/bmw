@@ -11,9 +11,21 @@
  * modules follow (the roof lamp unit on this car). Whether an installed app may reach them, and which of the
  * two this car fills, is NOT verified: this module only subscribes and reads, and reports what came back.
  *
+ * FACTORY ON / OFF (factoryOn()): the gate that releases custom lighting when the driver switches the ambient
+ * lighting off in iDrive. The field is the one IterioDev's Comfort service reads (service 0xB512 = 46354, notifier
+ * 0x8003 = 32771, payload byte 7 == 1; behaviour only, no source taken: THIRD_PARTY.md), checked against this
+ * head unit's catalogue: the notifier of statusAmbientLightInteriorColour is 32771 and byte 7 of its struct
+ * (UInt16 hue, menu, three layer hues, brightness offset, then the mode) is
+ *   statusModeAmbientePanoramicRoofInteriorLighting   ModeInteriorLighting  AUS 0, EIN 1, SIGNAL_UNBEFUELLT 3
+ * beside statusMenuAmbientePanoramicRoofInteriorLighting (AMBIENTEBELEUCHTUNG_AUS 0 ... SIGNAL_UNBEFUELLT 15) and
+ * AmbientLight.ambientLightActive (Bool). Any of them saying OFF is off; one saying ON with none saying off is
+ * on; nothing said, "unfilled", or the provider gone is UNKNOWN (null), which is never taken for "on".
+ * The catalogue is the head unit's own; what the car actually sends is NOT verified on the car.
+ *
  * It never writes. app.json lists these fields with "rs" only (no "w"), so the installer leaves the setters out
  * of the app's interface configs: a write is not possible from this app as built.
  */
+const EventEmitter = require('events');
 const AMBIENT = 'de.bmw.body.interiorillumination.AmbientLight';
 const COMFORT = 'de.bmw.infotainment.misc.ComfortFunctionIuK';
 const AMBIENT_FIELDS = ['ambientLightActive', 'brightnessAmbientLight', 'brightnessAmbientContourLine', 'currentInteriorLightProfile'];
@@ -34,10 +46,17 @@ function profileName(v) {
     return /^\d+$/.test(s) ? profileName(Number(s)) : s;
 }
 const unwrap = (v, key) => (v && typeof v === 'object' && key in v ? v[key] : v);
+/** One on/off-like value -> true | false | null (says nothing). */
+function triState(v) {
+    if (v === true || v === 1 || v === 'EIN') return true;
+    if (v === false || v === 0 || v === 'AUS' || v === 'AMBIENTEBELEUCHTUNG_AUS') return false;
+    return null;
+}
 const onOff = (v) => (v === true || v === 1 || v === 'EIN' ? 'on' : v === false || v === 0 || v === 'AUS' ? 'off' : String(v));
 
-class OemLighting {
+class OemLighting extends EventEmitter {
     constructor(signals, log, opts) {
+        super();
         this.signals = signals;
         this.log = log;
         this.now = (opts && opts.now) || Date.now;
@@ -50,16 +69,46 @@ class OemLighting {
     async start() {
         if (this.started) return this;
         this.started = true;
-        const take = (f) => (v) => { this.values[f] = { value: v, at: this.now() }; };
+        const take = (f) => (v) => this.take(f, v);
         const handlers = (fields) => fields.reduce((h, f) => { h[f] = take(f); return h; }, {});
         const one = async (iface, fields) => {
             if (!this.signals || !this.signals.watch) return { iface, available: false, error: 'no signals module' };
-            try { return await this.signals.watch(iface, '1', handlers(fields), this.log, { pollMs: 5000 }); } catch (e) { return { iface, available: false, error: String(e) }; }
+            try { return await this.signals.watch(iface, '1', handlers(fields), this.log); } catch (e) { return { iface, available: false, error: String(e) }; }
         };
         this.subs.ambient = await one(AMBIENT, AMBIENT_FIELDS);
         this.subs.comfort = await one(COMFORT, COMFORT_FIELDS);
         if (this.log) this.log.info('factory lighting read-out: ' + this.summary().join('; '));
         return this;
+    }
+
+    /** A value from the car (also the tests' way in). Emits 'change' when the on / off verdict changes. */
+    take(f, v) {
+        const was = this.factoryOn();
+        this.values[f] = { value: v, at: this.now() };
+        const is = this.factoryOn();
+        if (is !== was) { if (this.log) this.log.info('factory ambient lighting: ' + (is === null ? 'unknown' : is ? 'on' : 'off')); this.emit('change', is, was); }
+    }
+
+    /**
+     * Is the factory ambient lighting switched on?  true | false | null (unknown: nothing received, the signals
+     * "unfilled", or their provider no longer available). Unknown is for the caller to treat as NOT on.
+     */
+    factoryOn() {
+        const live = (sub) => !sub || sub.available !== false || sub.error;          // (a harness sub without the flag counts as live)
+        const colour = this.subs.comfort && !live(this.subs.comfort) ? null : this._v('statusAmbientLightInteriorColour');
+        const c = colour && typeof colour === 'object' ? colour : {};
+        const votes = [
+            triState(c.statusModeAmbientePanoramicRoofInteriorLighting),
+            c.statusMenuAmbientePanoramicRoofInteriorLighting === 0 || c.statusMenuAmbientePanoramicRoofInteriorLighting === 'AMBIENTEBELEUCHTUNG_AUS' ? false : null,
+            this.subs.ambient && !live(this.subs.ambient) ? null : triState(this._v('ambientLightActive')),
+        ];
+        if (votes.indexOf(false) >= 0) return false;
+        return votes.indexOf(true) >= 0 ? true : null;
+    }
+    /** Why factoryOn() is unknown, for the screen. */
+    unknownWhy() {
+        if (!Object.keys(this.values).length) return 'the head unit has not said whether the factory ambient lighting is on';
+        return 'the factory ambient lighting signal is unfilled or its provider is gone';
     }
 
     async shutdown() {
@@ -108,4 +157,4 @@ class OemLighting {
     }
 }
 
-module.exports = { OemLighting, PROFILES, profileName, AMBIENT, COMFORT, AMBIENT_FIELDS, COMFORT_FIELDS };
+module.exports = { OemLighting, triState, PROFILES, profileName, AMBIENT, COMFORT, AMBIENT_FIELDS, COMFORT_FIELDS };

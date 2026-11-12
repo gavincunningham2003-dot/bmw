@@ -125,6 +125,46 @@ changes while driving* can relax this. The simulated link is exempt.
 - The wheel is 24 ramped arcs in a cached layer; the dial is three arcs (no pixel images: the Store renderer
   has none). Angles follow the kit: 0 at 12 o'clock, clockwise.
 
+## 3b. 0.5.0: the service, the gate and the effects
+
+```
+ the platform starts the app (autostart)            the driver opens the app
+            |                                                  |
+   main.js  background(bg)  ------------------------  main.js  start(ctx)     the screen: drafts, pages, Apply
+            |                      ctx.background.svc          |
+            v                                                  v
+   lighting_service.js  LightingService (one per process) <----+   apply() / restoreOem() / touch()
+     |  gate(): release | lapse | open      asked on every signal, every 1.5 s, and by the controller
+     |  syncEffects(): doors, turn, dim     from the settings and the car
+     |  stop(): effects off, timers cleared, restoreOem(), subscriptions closed
+     |
+     +-- oem_lighting.js    factoryOn()  true | false | null      ComfortFunctionIuK, AmbientLight   (read)
+     +-- driving_modes.js   away()       true | false | null      VehicleCondition, FES              (read)
+     +-- car_signals.js     doors(), turn(), night()              DoorsWindowsRoofMirrors, Light, Vehicle (read)
+     +-- kit/parked.js      speed                                 Vehicle2                            (read)
+     |
+     +-- lighting_controller.js   apply / restoreOem / lapse / setEffects
+            _compose(now) = lighting_overlay.compose( lighting_scene.render(program), modules, effects, now )
+            ticker (anything moving) | keep-alive (still)  -> lighting_plan -> lighting_scheduler -> transport
+```
+
+- **Release** (a reason to hand the modules back now): the car parked or in standby with nobody in it
+  (VehicleCondition 1, 2, 3), the factory ambient lighting switched off, another controller on the unit.
+  **Lapse** (stop writing, send nothing, let ZEIT run out): the car's state or the factory lighting's state
+  is not known. A missing signal is never read as "in use" or "on". The header of `lighting_service.js` has
+  the full rules.
+- **Effects** never change the applied program or its time origin: the controller renders the program as
+  before and lays the effect over the modules it concerns, so an animation carries on in step. A module the
+  program leaves to the car is released the moment its effect ends.
+- **No reply is not a reason to write again**: `lighting_scheduler.js` records such a write as unanswered and
+  the controller treats it as possibly taken (driven, keep-alive from now); a read-back decides where one is
+  possible; three in a row stop control.
+- **Lifecycle** (kit `64486c5`, `kit/runtime/mgu.js`): `impl.background(bg)` runs once per process, with or
+  without screens; `impl.start(ctx)` when the app has screens, with `ctx.background`. `"autostart": true` in
+  `app.json` becomes `"mguAppStartType": "autostart"` in the package, which MGU Store's deploy tool turns
+  into the platform's start type. `autostart` alone does nothing without both of those: the kit's older
+  installer lists every app as `manually`. UNVERIFIED.md items 5 to 7.
+
 ## 4. The control paths, as ranked by the brief
 
 | # | Approach | Status |

@@ -32,7 +32,7 @@ see [PROTOCOL_FINDINGS.md](PROTOCOL_FINDINGS.md) and [NEXT_STEPS.md](NEXT_STEPS.
 | `app/ambient_rgb/` | the iDrive app for the MGU App Kit: `main.js` (five pages: Colours, Dual, Modes, Favourites, Diagnostics), `ui_widgets.js` (colour wheel, circular brightness dial, the rotary editor), `lighting_scene.js` (per-module scene, groups, zones, modes, presets), `lighting_scheduler.js` (the write queue), `lighting_controller.js` (apply / keep-alive / restore), `lighting_mock.js` (simulated BDC, 19 modules, fault injection), `lighting_bdc_uds.js` (the car, over TASU, gated), `lighting_protocol.js` (the bytes, verified), `colour.js`, `favourites.js` |
 | `tools/laptop/` | `enetdiag`: the read-only Windows ENET discovery utility (UDS 0x22 only), `write_test.py` (the gated one-frame-per-step write test, with a colour cycle and fades), `catalog_search.py` for the MGU's SOME/IP catalog |
 | `tests/` | 88 Node tests (colour, protocol, scene, scheduler with a throughput benchmark, controller, TASU path, favourites, UI) and 24 Python tests (framing, decoding, policy, redaction, a scan against a simulated car) |
-| `scripts/` | `stage.js` (lay the app out with the kit runtime for tests), `preview_frames.js` (PNG screenshots), `build_app.py` (the kit's real build) |
+| `scripts/` | `stage.js` (lay the app out with the kit runtime for tests), `preview_frames.js` (PNG screenshots), `build_app.py` (the MGU Store release build and its checks), `check_package.js`, `release.ps1` |
 | `docs/screens/` | screenshots rendered by the kit's own drawing code |
 | `RESEARCH.md` | every repository investigated, with commit SHAs, useful files and verdicts |
 | `ARCHITECTURE.md` | MGU, BDC, OEM lighting and the app's control paths |
@@ -47,7 +47,7 @@ npm run test:py                # the Python tests (loopback simulated car includ
 npm run preview                # renders the pages to preview/*.png
 npm run emu                    # the kit's live emulator: the app drawn by the car's own draw engine at http://localhost:8077
                                # (mouse = touch, mouse wheel or [ ] = the iDrive knob, Enter = press, arrows = tilt, Backspace = BACK)
-python scripts/build_app.py    # the kit's build -> dist/ambient_rgb@0.3.0.mgu (needs the real oap-sdk to be installable)
+python scripts/build_app.py    # the MGU Store release: dist/ambient_rgb@<version>.tgz and .mgu, checked (PUBLISHING.md)
 cd tools/laptop && python -m enetdiag selftest
 ```
 

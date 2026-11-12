@@ -36,7 +36,9 @@ class BdcUdsLightingController extends LightingController {
         this.allowUnknownVariant = !!o.allowUnknownVariant;
         this.maxSeconds = Math.min(254, o.maxSeconds || 30);
         this.refreshSeconds = Math.min(this.refreshSeconds, this.maxSeconds);
-        this.timeoutMs = o.timeoutMs || 3000;
+        this.timeoutMs = o.timeoutMs || 3000;                // a write's reply, from when the transport took it
+        this.maxCommandMs = Math.max(500, o.maxCommandMs || 5000);   // a write, whatever happens (the scheduler holds the same line)
+        this.readMaxMs = o.readMaxMs || 15000;               // a status read answers "pending" and takes seconds
         this.dryRuns = 0;
         this.lastRequest = null;
         this.lastReply = null;
@@ -59,12 +61,20 @@ class BdcUdsLightingController extends LightingController {
 
     /** One physical request to the BDC body through the gate. */
     async _request(sid, data, timeoutMs) {
+        // kit/diag.js would itself repeat a request the transport turned away (4 times, 1..4 s apart): switched off,
+        // the scheduler counts and limits those (setting "busyRetries"); hardTimeoutMs ends a request that never ends
+        const write = sid === P.SID.WRITE;
+        const opts = { maxRetries: 0, callTimeoutMs: write ? this.maxCommandMs : 8000, hardTimeoutMs: write ? this.maxCommandMs : this.readMaxMs };
         const bad = P.checkRequest(P.ADDR.BDC_BODY, sid, data);
         if (bad) { this.log.error('blocked a request: ' + bad); return { blocked: bad }; }
         const { replyTo } = this._kitDiag();
         this.lastRequest = P.hexBytes([sid].concat(data));
         let uds = null;
-        try { uds = await this.diag.physical(P.ADDR.BDC_BODY, sid, data, timeoutMs || this.timeoutMs, replyTo(sid, data)); } catch (e) { return { error: String(e && e.message || e) }; }
+        try { uds = await this.diag.physical(P.ADDR.BDC_BODY, sid, data, timeoutMs || this.timeoutMs, replyTo(sid, data), opts); } catch (e) {
+            const msg = String(e && e.message || e);
+            // turned away before it was sent (the gateway busy with another request): safe to send again, later
+            return /TEMPORARILY_NOT_ACCEPTED|BUSY/i.test(msg) ? { error: msg, busy: true } : { error: msg };
+        }
         this.lastReply = uds ? P.hexBytes(uds) : null;
         return { uds };
     }
@@ -115,8 +125,8 @@ class BdcUdsLightingController extends LightingController {
     /** A dry run writes nothing, so there is nothing to read back. */
     _canVerify() { return this.armed; }
 
-    canControl() {
-        const base = super.canControl();
+    canControl(o) {
+        const base = super.canControl(o);
         if (!base.ok) return base;
         if (!this.slavesFromCar) return { ok: false, reason: 'slave list not read from the car' };
         const rgb = this.capabilities && this.capabilities.rgbActuator;
@@ -130,7 +140,7 @@ class BdcUdsLightingController extends LightingController {
         if (!this.armed) { this.dryRuns++; this.log.info('DRY RUN (not armed): 0x40 <- ' + shown); return { ok: true, dryRun: true, bytes: shown }; }
         const did = (bytes[0] << 8) | bytes[1];
         let r = await this._request(P.SID.WRITE, bytes);
-        if (r.blocked || r.error) return { ok: false, reason: r.blocked || r.error, bytes: shown };
+        if (r.blocked || r.error) return { ok: false, busy: !!r.busy, reason: r.blocked || r.error, bytes: shown };
         let dec = P.decodeReply(P.SID.WRITE, did, r.uds);
         if (!dec.ok && (dec.nrc === 0x7E || dec.nrc === 0x7F)) {
             const s = await this._request(P.SID.SESSION, [0x03]);

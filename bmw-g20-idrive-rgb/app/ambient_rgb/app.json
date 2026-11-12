@@ -1,11 +1,12 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: colour wheel and circular brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep and Sport Pulse, lighting by driving mode, saved configurations. Preview on screen, apply on confirmation; the body controller's own light actuator (verified on a G20); the factory lighting keeps priority and is restored at a press or by itself.",
-  "version": "0.4.0",
+  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep and Sport Pulse, lighting by driving mode, saved configurations, an open door's line flashing red, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: custom lighting is released when the car is left or the factory ambient lighting is switched off.",
+  "version": "0.5.0",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
+  "autostart": true,
   "signals": {
     "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
       "_instances": "SystemFunctionsInternalTasuInst1",
@@ -25,14 +26,14 @@
       "statusCarSpeed2": "rs"
     },
     "de.bmw.body.interiorillumination.AmbientLight": {
-      "_optional": "no factory lighting read-out on Diagnostics",
+      "_optional": "the factory ambient lighting switched off is not noticed from this interface",
       "ambientLightActive": "rs",
       "brightnessAmbientLight": "rs",
       "brightnessAmbientContourLine": "rs",
       "currentInteriorLightProfile": "rs"
     },
     "de.bmw.infotainment.misc.ComfortFunctionIuK": {
-      "_optional": "no factory colour read-out on Diagnostics",
+      "_optional": "the factory ambient lighting switched off is not noticed from this interface",
       "statusAmbientLightInteriorColour": "rs"
     },
     "de.bmw.infotainment.drivingexcitement.FES": {
@@ -40,8 +41,20 @@
       "statusFESVehicleDynamicSwitchHMI": "rs"
     },
     "de.bmw.infrastructure.VehicleCondition": {
-      "_optional": "the car locked and left is not noticed (the lighting still lapses by itself)",
+      "_optional": "the car locked and left is not noticed: custom lighting then stops by itself after 15 minutes without use",
       "VehicleCondition": "s"
+    },
+    "de.bmw.body.DoorsWindowsRoofMirrors": {
+      "_optional": "no red flash for an open door",
+      "CentralLockingSystemAndPanelStatus": "s"
+    },
+    "de.bmw.body.Light": {
+      "_optional": "no green glow with the turn indicators",
+      "StatusFunctionsIndicators": "s"
+    },
+    "de.bmw.infotainment.vehicle.Vehicle": {
+      "_optional": "no dimming at night",
+      "statusDayNightChangeOver": "rs"
     }
   },
   "screens": [
@@ -165,7 +178,7 @@
         ],
         [
           "broadcast",
-          "Whole bus where it saves writes (NAD 0, test first)"
+          "Whole bus where it saves writes (NAD 0, read back)"
         ]
       ]
     },
@@ -193,17 +206,17 @@
       "options": [
         [
           "release",
-          "Release custom lighting"
+          "Release custom lighting (unknown: stop renewing it)"
         ],
         [
           "ignore",
-          "Keep custom lighting"
+          "Keep custom lighting (ignores the factory switch)"
         ]
       ]
     },
     {
       "key": "resume",
-      "label": "Lighting back when the car is unlocked",
+      "label": "Lighting back when the car or the factory lighting returns",
       "type": "choice",
       "default": "off",
       "options": [
@@ -262,6 +275,70 @@
         [
           "on",
           "On"
+        ]
+      ]
+    },
+    {
+      "key": "doorFlash",
+      "label": "Open door red flash",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On: an open door's contour line flashes red"
+        ]
+      ]
+    },
+    {
+      "key": "turnGlow",
+      "label": "Turn indicator green glow",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On: that side's door lines blink green"
+        ]
+      ]
+    },
+    {
+      "key": "drive",
+      "label": "Steering wheel side (for the indicator glow)",
+      "type": "choice",
+      "default": "rhd",
+      "options": [
+        [
+          "rhd",
+          "Right-hand drive"
+        ],
+        [
+          "lhd",
+          "Left-hand drive"
+        ]
+      ]
+    },
+    {
+      "key": "nightDim",
+      "label": "Dim at night",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "on",
+          "On: half brightness at night"
         ]
       ]
     },
@@ -339,12 +416,25 @@
       "options": [
         [
           "1",
-          "1 (TASU takes one at a time)"
+          "1 (default: the gateway takes one at a time)"
         ],
         [
           "2",
-          "2 (one per LIN bus)"
+          "2, one per LIN bus (NOT verified on the car)"
         ]
+      ]
+    },
+    {
+      "key": "busyRetries",
+      "label": "Retries when the car says busy",
+      "type": "number",
+      "default": 3,
+      "steps": [
+        0,
+        1,
+        2,
+        3,
+        5
       ]
     },
     {
