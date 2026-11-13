@@ -2,7 +2,7 @@
   "id": "ambient_rgb",
   "title": "Ambient RGB",
   "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) written a whole LIN bus at a time, lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",

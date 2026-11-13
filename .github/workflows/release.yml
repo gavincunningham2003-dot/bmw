@@ -1,7 +1,7 @@
 # Builds and publishes the MGU Store release of Ambient RGB when a version tag is pushed
 # (bmw-g20-idrive-rgb/PUBLISHING.md). Nothing here touches a car.
 #
-#   git tag v0.5.1 && git push origin v0.5.1
+#   git tag v0.5.2 && git push origin v0.5.2
 #
 # The packages contain no BMW code: BMW's oap-sdk is not redistributable and cannot exist on a build
 # machine. scripts/build_app.py --ci gives the kit's copy step an empty stand-in, removes it again and

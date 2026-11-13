@@ -9,13 +9,13 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
-## Results, 0.5.1 (2026-11-13, Windows 11, Node 24, Python 3.12, kit `64486c5` and kit `89de8c0`)
+## Results, 0.5.1 and 0.5.2 (2026-11-13, Windows 11, Node 24, Python 3.12, kit `64486c5` and kit `89de8c0`)
 
 ```
 npm test          TOTAL: 194 passed, 0 failed       (the same against both kit commits)
 npm run test:py   Ran 37 tests ... OK (skipped=8)
 python scripts/build_app.py --ci
-                  OK: ambient_rgb@0.5.1 passed every check (iDrive 7, autostart, no SDK inside)
+                  OK: ambient_rgb@0.5.2 passed every check (iDrive 7, autostart, no SDK inside)
 ```
 
 New in 0.5.1:

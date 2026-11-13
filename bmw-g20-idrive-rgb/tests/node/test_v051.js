@@ -594,8 +594,13 @@ test('a car that refuses NAD 0: the handback falls back to one release a module,
 /* ================= 7. the settings, the screen ================= */
 test('settings: whole-bus writes and the door handback are on from the start; no red-door setting; the version', () => {
     const def = (k) => SPEC.settings.find((s) => s.key === k);
-    assert.strictEqual(SPEC.version, '0.5.1');
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.5.1');
+    assert.strictEqual(SPEC.version, '0.5.2');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.5.2');
+    // the app's own icon (0.5.2): a PNG of the size the kit's icons have, small enough for MGU Store to show (128 KiB)
+    const icon = fs.readFileSync(path.join(APP, 'icon.png'));
+    assert.deepStrictEqual(Array.from(icon.slice(0, 8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    assert.deepStrictEqual([icon.readUInt32BE(16), icon.readUInt32BE(20)], [140, 140]);
+    assert.ok(icon.length < 128 * 1024, icon.length + ' bytes');
     assert.strictEqual(def('txMode').default, 'broadcast');
     assert.strictEqual(def('doorRelease').default, 'on');
     assert.strictEqual(def('doorFlash'), undefined);

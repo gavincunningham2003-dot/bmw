@@ -48,7 +48,7 @@ The last command ends with `OK: ambient_rgb@<version> passed every check ...` or
 what failed. It writes into `dist\` (never committed):
 
 ```
-ambient_rgb@0.5.1.tgz   ambient_rgb@0.5.1.mgu   mgu-store.json   ambient_rgb.png   BUILD.json
+ambient_rgb@0.5.2.tgz   ambient_rgb@0.5.2.mgu   mgu-store.json   ambient_rgb.png   BUILD.json
 ```
 
 `BUILD.json` records what was built from what (kit commit, source commit, whether the tree was dirty) and each
@@ -75,11 +75,11 @@ Commit, tag the version in `app.json`, push, then run the release script. It run
 again and uploads the four assets with `gh release create`:
 
 ```powershell
-git tag v0.5.1
+git tag v0.5.2
 ```
 
 ```powershell
-git push origin main v0.5.1
+git push origin main v0.5.2
 ```
 
 ```powershell

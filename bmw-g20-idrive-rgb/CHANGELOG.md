@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 (2026-11-13)
+
+- **A new app icon** (`app/ambient_rgb/icon.png`, 140 x 140): the G20's cabin at night with its ambient lines lit,
+  the colour ring on the screen and the app's name, in place of the generated "RGB" glyph. The kit's build
+  takes an app's `icon.png` as it is; MGU Store shows the same picture for the release. Supplied by the author.
+- Nothing else changed: the lighting code is 0.5.1's.
+
 ## 0.5.1 (2026-11-13)
 
 The animations and the way the lights are updated are now the MGU App Kit Ambient Config's own, an open door's

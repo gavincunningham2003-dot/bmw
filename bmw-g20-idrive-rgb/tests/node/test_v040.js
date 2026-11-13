@@ -426,7 +426,7 @@ test('the app: the Driving page and the two one-time modes draw; the version; th
     await h.press('mode:welcome');
     assert.strictEqual(h.app.modesProgram().mode, 'welcome');
     assert.ok(cv);
-    assert.strictEqual(h.ctx.spec.version, '0.5.1');
+    assert.strictEqual(h.ctx.spec.version, '0.5.2');
     ['de.bmw.infotainment.drivingexcitement.FES', 'de.bmw.infrastructure.VehicleCondition'].forEach((i) => {
         const s = h.ctx.spec.signals[i];
         assert.ok(s && s._optional, i);

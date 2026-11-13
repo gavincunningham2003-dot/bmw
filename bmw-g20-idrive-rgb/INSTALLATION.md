@@ -116,7 +116,7 @@ Everything new in 0.4.0 is off or on its safe value after an install. Switch thi
 Build, test and install commands are unchanged: `npm test`, `npm run test:py`, `python scripts/build_app.py`,
 then part D.
 
-## H. 0.5.1: install through MGU Store (the preferred way)
+## H. 0.5.2: install through MGU Store (the preferred way)
 
 [MGU Store](https://github.com/robertnisipeanu/mgu-store) is an app on the head unit that installs other apps
 from GitHub releases. This is the way that gives the app its **background start** (the Store's installer lists
@@ -132,11 +132,11 @@ nothing in this repository does them.
 committed on `main`:
 
 ```powershell
-git tag v0.5.1
+git tag v0.5.2
 ```
 
 ```powershell
-git push origin main v0.5.1
+git push origin main v0.5.2
 ```
 
 ```powershell
@@ -149,9 +149,9 @@ powershell -ExecutionPolicy Bypass -File scripts\release.ps1
    **Add token** (a fine-grained GitHub token for this repository only, **Contents: Read-only**), or
    **Sign in with GitHub**. Typing is easier from the Store's phone page (Settings → **Phone access**).
 2. Store → Settings → **Add source** → `gavincunningham2003-dot/bmw` → **Releases**.
-3. Store → Settings → **Check now**. **Ambient RGB 0.5.1** appears in the list.
+3. Store → Settings → **Check now**. **Ambient RGB 0.5.2** appears in the list.
 
-No internet in the car: copy `dist\ambient_rgb@0.5.1.tgz` into a folder named `oap` on a USB stick, plug it in,
+No internet in the car: copy `dist\ambient_rgb@0.5.2.tgz` into a folder named `oap` on a USB stick, plug it in,
 and use the Store's **USB** tab instead of steps 1 to 3.
 
 ### H3. Install
