@@ -22,7 +22,8 @@
  *     the controller's read-back to say.
  *   - maxCommandMs: no single write is waited for longer than this, whatever the transport does (it then counts as
  *     unanswered), so one stuck request cannot hold the queue
- *   - pause()/resume() for a lost transport; clear() drops everything queued; drain() resolves when nothing is
+ *   - pause()/resume() for a lost transport; hold()/unhold() while a read-back has the link (queued writes wait);
+ *     clear() drops everything queued; drain() resolves when nothing is
  *     queued or in flight (restoreOem waits for it, so "released" is only reported once it is true)
  *   - stats for the diagnostics page: writes, accepted, rejected, busy, timeouts, dropped, latency, writes per second
  *
@@ -61,6 +62,8 @@ class WriteScheduler extends EventEmitter {
         this._seq = 0;
         this._timer = null;
         this._drains = [];
+        this._idles = [];
+        this._holds = 0;                   // hold(): a read-back has the transport, nothing is sent meanwhile
         this._lastSendAt = null;
         this.stats = { writes: 0, accepted: 0, rejected: 0, busy: 0, busyGivenUp: 0, timeouts: 0, dropped: 0, skipped: 0, latencyMs: null, avgLatencyMs: null, writesPerSec: 0 };
         this._window = [];                 // send times of the last few seconds, for writes per second
@@ -113,6 +116,16 @@ class WriteScheduler extends EventEmitter {
     /* ---------- control ---------- */
     pause() { this.paused = true; this._stopTimer(); }
     resume() { this.paused = false; this._pump(); }
+    /**
+     * hold() / unhold(): nothing new is sent while something else has the diagnostic link (the controller's
+     * read-back: the gateway takes one request at a time, and a write sent into a read would only be turned away
+     * as busy). Ambient Config's lights.js has the same thing as hold(key, on). Counted, and apart from pause(),
+     * which is the lost transport's. What is queued stays queued and goes out on the last unhold().
+     */
+    hold() { this._holds++; this._stopTimer(); }
+    unhold() { if (this._holds > 0 && --this._holds === 0) this._pump(); }
+    /** Resolves once nothing is in flight (things may still be queued: see hold()). */
+    idle() { return this.inFlight.size ? new Promise((resolve) => this._idles.push(resolve)) : Promise.resolve(); }
     /** Drop everything queued (not what is in flight). */
     clear(prio) {
         let n = 0;
@@ -142,7 +155,7 @@ class WriteScheduler extends EventEmitter {
         return best;
     }
     _pump() {
-        if (this.paused) return;
+        if (this.paused || this._holds) return;
         while (this.inFlight.size < this.maxInFlight) {
             const gap = this._lastSendAt == null ? Infinity : this._now() - this._lastSendAt;
             if (gap < this.minGapMs) { this._arm(this.minGapMs - gap); return; }
@@ -176,6 +189,7 @@ class WriteScheduler extends EventEmitter {
         this.stats.latencyMs = dt;
         this.stats.avgLatencyMs = this.stats.avgLatencyMs == null ? dt : Math.round(this.stats.avgLatencyMs * 0.8 + dt * 0.2);
         this.inFlight.delete(it.key);
+        if (!this.inFlight.size && this._idles.length) { const w = this._idles; this._idles = []; w.forEach((f) => f()); }
         if (r && r.ok) {
             this.stats.accepted++;
             this.last.set(it.key, { params: it.params, at: this._now(), ok: true });
@@ -203,7 +217,7 @@ class WriteScheduler extends EventEmitter {
 
     /** Snapshot for the diagnostics page. */
     status() {
-        return Object.assign({}, this.stats, { queued: this.queue.size, inFlight: this.inFlight.size, paused: this.paused, maxInFlight: this.maxInFlight, maxBusyRetries: this.maxBusyRetries, maxCommandMs: this.maxCommandMs, known: this.last.size });
+        return Object.assign({}, this.stats, { queued: this.queue.size, inFlight: this.inFlight.size, paused: this.paused, held: this._holds > 0, maxInFlight: this.maxInFlight, maxBusyRetries: this.maxBusyRetries, maxCommandMs: this.maxCommandMs, known: this.last.size });
     }
 }
 

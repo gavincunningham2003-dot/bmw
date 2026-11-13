@@ -60,16 +60,28 @@ test('plan: a bus with a module left to the car is never written with NAD 0; a b
     assert.deepStrictEqual(one.map((x) => x.key), ['2:7']);
     assert.deepStrictEqual(PL.plan(sceneOf(m, T1), m, last, { mode: 'broadcast' }), [], 'nothing due, nothing written');
 });
-test('planRelease: one NAD 0 release a bus in broadcast mode, one each otherwise', () => {
+test('planRelease: the whole cabin back in one NAD 0 release a bus; one each only once the car refused NAD 0', () => {
     const m = mods(7, 12);
-    assert.deepStrictEqual(PL.planRelease(m, m, { mode: 'broadcast' }).map((x) => x.key), ['1:0', '2:0']);
-    assert.strictEqual(PL.planRelease(m, m, { mode: 'individual' }).length, 19);
-    assert.deepStrictEqual(PL.planRelease([m[0]], m, { mode: 'broadcast' }).map((x) => x.key), ['1:1'], 'a single module: its own release');
-    assert.ok(PL.planRelease(m, m, { mode: 'broadcast' }).every((x) => x.params.active === false && x.params.seconds === 0));
+    assert.deepStrictEqual(PL.planRelease(m, m, { whole: true }).map((x) => x.key), ['1:0', '2:0']);
+    assert.strictEqual(PL.planRelease(m, m, { whole: false }).length, 19);
+    assert.deepStrictEqual(PL.planRelease([m[0]], m, { whole: true }).map((x) => x.key), ['1:1'], 'a single module: its own release');
+    assert.ok(PL.planRelease(m, m, { whole: true }).every((x) => x.params.active === false && x.params.seconds === 0));
+    // a module that has been seen to miss whole-bus writes gets its own release after the bus's
+    assert.deepStrictEqual(PL.planRelease(m, m, { whole: true, deaf: new Set(['1:1']) }).map((x) => x.key), ['1:0', '1:1', '2:0']);
+});
+test('planRelease: a bus where any module keeps its colour is never released whole (one door open, a zone changed)', () => {
+    const m = mods(7, 12);
+    // two doors of bus 2 open at once: their two modules, and nothing else on that bus
+    const keep = new Set(m.filter((x) => !(x.bus === 2 && (x.nad === 8 || x.nad === 11))).map((x) => x.bus + ':' + x.nad));
+    assert.deepStrictEqual(PL.planRelease([m[7 + 7], m[7 + 10]], m, { whole: true, keep }).map((x) => x.key), ['2:8', '2:11']);
+    // every module of bus 1 goes, bus 2 keeps one colour: bus 1 whole, bus 2 singly
+    const keep2 = new Set(['2:1']);
+    const rel = m.filter((x) => x.bus === 1).concat([m[8], m[9]]);
+    assert.deepStrictEqual(PL.planRelease(rel, m, { whole: true, keep: keep2 }).map((x) => x.key), ['1:0', '2:2', '2:3']);
 });
 
 /* ---------- the controller with whole-bus writes ---------- */
-test('individual is the default: 19 writes, none to NAD 0', async () => {
+test('single writes when asked for (setting "One per module"): 19 writes, none to NAD 0', async () => {
     const { c } = make();
     await c.connect();
     await c.apply(RED);
@@ -78,10 +90,19 @@ test('individual is the default: 19 writes, none to NAD 0', async () => {
     assert.ok(!nads(c).some((k) => /:0$/.test(k)));
 });
 test('broadcast: a solid colour is 2 writes and every module shows it; Restore OEM is 2 writes and reports all released', async () => {
-    const { c } = make({}, { txMode: 'broadcast' });
+    const { c, clock } = make({}, { txMode: 'broadcast' });
     await c.connect();
+    const checks = [];
+    c.on('verified', (v) => checks.push(v));
     const r = await c.apply(RED);
-    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0, confirmed: 19, missed: 0 });
+    // Apply answers as soon as the two writes are out: the read-back comes later, in the background
+    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0, verifying: true });
+    assert.strictEqual(c.bdc.requests.filter((q) => q.sid === 0x22 && (q.data[0] === 0xDA || q.data[0] === 0xE3)).length, 2, 'only the probe\'s reads so far');
+    assert.deepStrictEqual(nads(c), ['1:0', '2:0']);
+    await clock.advance(1600);
+    assert.deepStrictEqual(checks, [{ confirmed: 19, missed: 0, unread: 0 }], 'read back once, 1.5 s later, nothing to repair, no second read');
+    await clock.advance(3000);
+    assert.strictEqual(checks.length, 1);
     assert.deepStrictEqual(nads(c), ['1:0', '2:0']);
     assert.deepStrictEqual(writes(c)[0].data, [0xDA, 0x5E, 0, 1, 100, 254, 0, 0, 10]);
     c.slaves.forEach((s) => assert.deepStrictEqual(phys(c, s.bus + ':' + s.nad), [254, 0, 0, 100, 'custom']));
@@ -89,6 +110,7 @@ test('broadcast: a solid colour is 2 writes and every module shows it; Restore O
     const o = await c.restoreOem();
     assert.deepStrictEqual([o.ok, o.released, o.failed.length], [true, 19, 0]);
     assert.strictEqual(writes(c).length, 4);
+    assert.deepStrictEqual(nads(c).slice(2), ['1:0', '2:0']);
     c.slaves.forEach((s) => assert.strictEqual(phys(c, s.bus + ':' + s.nad)[4], 'oem'));
 });
 test('broadcast: dual colour puts the right colour on every module with fewer writes than modules', async () => {
@@ -119,23 +141,35 @@ test('a car that refuses NAD 0: falls back to single writes, every module still 
     assert.ok(r.written >= 0);
 });
 test('a module that misses the whole-bus write (bus 1 NAD 1 on the G20): the read-back finds it, repairs it, and it gets its own write from then on', async () => {
-    const { c } = make({ deafKeys: ['1:1'] }, { txMode: 'broadcast' });
+    const { c, clock } = make({ deafKeys: ['1:1'] }, { txMode: 'broadcast' });
     await c.connect();
+    const checks = [];
+    c.on('verified', (v) => checks.push([v.confirmed, v.missed]));
     const r = await c.apply(RED);
-    assert.deepStrictEqual([r.confirmed, r.missed], [18, 1], 'whole-bus mode reads back even with the setting off');
-    assert.deepStrictEqual(nads(c), ['1:0', '2:0', '1:1']);
+    assert.strictEqual(r.verifying, true, 'whole-bus mode reads back even with the setting off');
+    assert.deepStrictEqual(nads(c), ['1:0', '2:0'], 'Apply did not wait for the read-back');
+    await clock.advance(1600);
+    assert.deepStrictEqual(checks, [[18, 1]], 'the read-back found the module that kept the car\'s colour');
+    assert.deepStrictEqual(nads(c), ['1:0', '2:0', '1:1'], 'and wrote it on its own');
+    await clock.advance(1600);
+    assert.deepStrictEqual(checks, [[18, 1], [19, 0]], 'a second read confirms the repair');
     c.slaves.forEach((s) => assert.deepStrictEqual(phys(c, s.bus + ':' + s.nad).slice(0, 3), [254, 0, 0], s.location));
     assert.deepStrictEqual(Array.from(c.deaf), ['1:1']);
     const n = writes(c).length;
-    const r2 = await c.apply({ mode: 'solid', colour: { r: 0, g: 0, b: 254 }, brightness: 100, zone: 'all' });
+    await c.apply({ mode: 'solid', colour: { r: 0, g: 0, b: 254 }, brightness: 100, zone: 'all' });
     assert.deepStrictEqual(nads(c).slice(n), ['1:0', '1:1', '2:0'], 'its own write straight after the whole-bus one');
-    assert.deepStrictEqual([r2.confirmed, r2.missed], [19, 0]);
+    await clock.advance(1600);
+    assert.deepStrictEqual(checks[2], [19, 0]);
+    // handing back: the bus, then that module on its own as well
+    const m = writes(c).length;
     await c.restoreOem();
+    assert.deepStrictEqual(nads(c).slice(m), ['1:0', '1:1', '2:0']);
+    assert.ok(c.slaves.every((s) => phys(c, s.bus + ':' + s.nad)[4] === 'oem'));
 });
 test('a moving program with whole-bus writes: rainbow frames are 2 writes each', async () => {
     const { c, clock } = make({}, { txMode: 'broadcast', frameMs: 100 });
     await c.connect();
-    await c.apply({ mode: 'rainbow', periodS: 6, brightness: 100, zone: 'all' });
+    await c.apply({ mode: 'rainbow', zone: 'all' });
     const n0 = writes(c).length;
     await clock.advance(1000);
     const added = writes(c).slice(n0);
@@ -158,13 +192,16 @@ test('welcome sweep: the dashboard comes on before the rear, and it ends on the 
 test('sport pulse: red for 1.5 s, then the follow-on colour; a one-time program never nests another', () => {
     const m = [{ bus: 1, nad: 1, locationId: 0x0F }];
     const p = { mode: 'pulse', then: { mode: 'solid', colour: { r: 0, g: 0, b: 254 }, brightness: 60, zone: 'all' } };
-    assert.deepStrictEqual(S.render(p, m, 500, {})['1:1'], { r: 254, g: 0, b: 0, brightness: 100 });
+    // (Ambient Config's red is 255; on the wire every colour byte stops at 254, as 255 means "no change")
+    assert.deepStrictEqual(S.render(p, m, 500, {})['1:1'], { r: 255, g: 0, b: 0, brightness: 100 });
+    assert.deepStrictEqual(S.render(p, m, 1499, {})['1:1'], { r: 255, g: 0, b: 0, brightness: 100 });
+    assert.strictEqual(P.encodeLayeringWrite({ bus: 1, nad: 1, active: true, brightness: 100, r: 255, g: 0, b: 0, seconds: 5 })[5], 254);
     assert.deepStrictEqual(S.render(p, m, 1600, {})['1:1'], { r: 0, g: 0, b: 254, brightness: 60 });
     assert.strictEqual(S.normalise({ mode: 'pulse', then: { mode: 'welcome' } }).then, null);
 });
 test('speed steps: slow is 1.6 x the base time, fast 0.55 x (the same picture at a scaled time)', () => {
     const m = [{ bus: 1, nad: 1, locationId: 0x0F }];
-    const base = { mode: 'rainbow', periodS: 10, brightness: 100, zone: 'all' };
+    const base = { mode: 'rainbow', zone: 'all' };
     assert.deepStrictEqual(S.render(Object.assign({ speed: 1 }, base), m, 1600, {}), S.render(base, m, 1000, {}));
     assert.deepStrictEqual(S.render(Object.assign({ speed: 3 }, base), m, 550, {}), S.render(base, m, 1000, {}));
     assert.strictEqual(S.normalise(Object.assign({ speed: 9 }, base)).speed, 2);
@@ -185,22 +222,30 @@ test('a one-time program runs once: then its follow-on is applied; with none, th
     assert.strictEqual(c.program, null);
     assert.strictEqual(phys(c, '2:1')[4], 'oem');
 });
-test('hold times: a still program holds the chosen time, a moving one at most moveSeconds', async () => {
+test('hold times: a still program holds the chosen time, a moving one 5 s renewed after 3 (Ambient Config\'s)', async () => {
     const { c } = make({}, { refreshSeconds: 60 });
     await c.connect();
     await c.apply(RED);
     assert.strictEqual(writes(c)[0].data[8], 60);
     const n = writes(c).length;
-    await c.apply({ mode: 'breathing', colour: { r: 9, g: 9, b: 9 }, minBrightness: 10, maxBrightness: 90, periodS: 4 });
-    assert.strictEqual(writes(c)[n].data[8], 10);
+    assert.strictEqual(c.renewMs(), 30000);
+    await c.apply({ mode: 'breathing' });
+    assert.strictEqual(writes(c)[n].data[8], 5);
+    assert.strictEqual(c.holdSeconds(), 5);
+    assert.strictEqual(c.renewMs(), 3000);
     await c.restoreOem();
 });
-test('read-back after a still Apply: every module confirmed', async () => {
-    const { c } = make({}, { verify: true });
+test('read-back after a still Apply, in the background: every module confirmed', async () => {
+    const { c, clock } = make({}, { verify: true });
     await c.connect();
+    let check = null;
+    c.on('verified', (v) => { check = v; });
     const r = await c.apply(RED);
-    assert.strictEqual(r.confirmed, 19);
-    assert.strictEqual(r.missed, 0);
+    assert.strictEqual(r.verifying, true);
+    assert.strictEqual(check, null, 'not during Apply');
+    await clock.advance(1600);
+    assert.strictEqual(check.confirmed, 19);
+    assert.strictEqual(check.missed, 0);
     assert.strictEqual(c.slaves.length, 19, 'the read-back does not change the module list');
 });
 
@@ -381,7 +426,7 @@ test('the app: the Driving page and the two one-time modes draw; the version; th
     await h.press('mode:welcome');
     assert.strictEqual(h.app.modesProgram().mode, 'welcome');
     assert.ok(cv);
-    assert.strictEqual(h.ctx.spec.version, '0.5.0');
+    assert.strictEqual(h.ctx.spec.version, '0.5.1');
     ['de.bmw.infotainment.drivingexcitement.FES', 'de.bmw.infrastructure.VehicleCondition'].forEach((i) => {
         const s = h.ctx.spec.signals[i];
         assert.ok(s && s._optional, i);

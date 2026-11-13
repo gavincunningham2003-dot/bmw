@@ -64,39 +64,72 @@ test('zones program: later assignments win, others untouched', () => {
     assert.deepStrictEqual(sc['2:1'], { r: 1, g: 1, b: 1, brightness: 50 });
     assert.strictEqual(Object.keys(sc).length, 19);
 });
-test('rainbow turns the hue once per period; brightness as set', () => {
-    const p = { mode: 'rainbow', periodS: 10, brightness: 60, zone: 'all' };
-    const a = S.render(p, modules, 0)['2:1'], b = S.render(p, modules, 2500)['2:1'], c = S.render(p, modules, 10000)['2:1'];
-    assert.deepStrictEqual([a.r, a.g, a.b], [255, 0, 0], 'hue 0 = red');
-    assert.deepStrictEqual([b.r, b.g, b.b], [128, 255, 0], 'a quarter turn: hue 90');
-    assert.deepStrictEqual([c.r, c.g, c.b], [255, 0, 0], 'a full turn');
-    assert.strictEqual(a.brightness, 60);
+/* The animations are the MGU App Kit Ambient Config's (ambient_config_scenes.js, unchanged): the figures below are
+ * that file's, worked out by hand (rainbow 12 s, fade 8 s, breathing 4 s, wave 5 s at normal speed; slow x 1.6,
+ * fast x 0.55). test_v051.js compares render() with its lightAt() module by module. */
+const RED = { r: 254, g: 0, b: 0 }, BLUE = { r: 0, g: 0, b: 254 };
+const look = (mode, more) => Object.assign({ mode, top: { colour: RED, brightness: 60 }, bottom: { colour: BLUE, brightness: 20 } }, more || {});
+test('rainbow: the whole cabin one colour, once round in 12 s (19.2 s slow, 6.6 s fast), at the upper brightness', () => {
+    const p = look('rainbow');
+    const at = (ms, q) => { const t = S.render(q || p, modules, ms)['2:1']; return [t.r, t.g, t.b]; };
+    assert.deepStrictEqual(at(0), [255, 0, 0], 'hue 0 = red');
+    assert.deepStrictEqual(at(3000), [128, 255, 0], 'a quarter turn: hue 90');
+    assert.deepStrictEqual(at(12000), [255, 0, 0], 'a full turn');
+    assert.deepStrictEqual(at(4800, look('rainbow', { speed: 1 })), [128, 255, 0], 'slow: the quarter turn at 12 s x 1.6 / 4');
+    assert.deepStrictEqual(at(1650, look('rainbow', { speed: 3 })), [128, 255, 0], 'fast: at 12 s x 0.55 / 4');
+    const sc = S.render(p, modules, 5000);
+    assert.strictEqual(Object.keys(sc).length, 19);
+    assert.strictEqual(new Set(Object.keys(sc).map((k) => JSON.stringify(sc[k]))).size, 1, 'every module the same colour: one write a bus');
+    assert.strictEqual(sc['1:1'].brightness, 60, 'lower modules too take the upper brightness');
 });
-test('fade glides through the palette with holds', () => {
-    const p = { mode: 'fade', colours: [{ r: 254, g: 0, b: 0 }, { r: 0, g: 0, b: 254 }], transitionMs: 1000, holdMs: 1000, brightness: 100, zone: 'dashboard' };
-    const at = (ms) => S.render(p, modules, ms)['2:1'];
-    assert.deepStrictEqual([at(0).r, at(0).b], [254, 0], 'holding red');
-    assert.deepStrictEqual([at(500).r, at(500).b], [254, 0], 'still holding');
-    const mid = at(1500);
-    assert.ok(mid.r > 100 && mid.r < 160 && mid.b > 100 && mid.b < 160, 'half way: ' + JSON.stringify(mid));
-    assert.deepStrictEqual([at(2000).r, at(2000).b], [0, 254], 'blue');
-    assert.deepStrictEqual([at(4000).r, at(4000).b], [254, 0], 'back round');
+test('fade: every light from the upper colour to the lower one and back in 8 s, the brightness with it', () => {
+    const p = look('fade');
+    const at = (ms) => S.render(p, modules, ms);
+    assert.deepStrictEqual(at(0)['2:1'], { r: 254, g: 0, b: 0, brightness: 60 }, 'the upper colour');
+    assert.deepStrictEqual(at(4000)['2:1'], { r: 0, g: 0, b: 254, brightness: 20 }, 'half way round: the lower colour');
+    assert.deepStrictEqual(at(2000)['2:1'], { r: 127, g: 0, b: 127, brightness: 40 }, 'a quarter: half way between');
+    assert.deepStrictEqual(at(8000)['2:1'], at(0)['2:1'], 'back');
+    assert.deepStrictEqual(at(2000)['1:1'], at(2000)['2:1'], 'upper and lower lights alike');
 });
-test('breathing moves the brightness between the limits, smoothly', () => {
-    const p = { mode: 'breathing', colour: { r: 10, g: 20, b: 30 }, minBrightness: 10, maxBrightness: 90, periodS: 4, zone: 'all' };
-    const b = (ms) => S.render(p, modules, ms)['1:1'].brightness;
-    assert.strictEqual(b(0), 10); assert.strictEqual(b(2000), 90); assert.strictEqual(b(4000), 10);
-    assert.ok(b(1000) > 40 && b(1000) < 60);
-    const swapped = S.normalise({ mode: 'breathing', minBrightness: 80, maxBrightness: 20 });
-    assert.deepStrictEqual([swapped.minBrightness, swapped.maxBrightness], [20, 80]);
+test('breathing: each group in its own colour, between 12 % and 100 % of its brightness, every 4 s', () => {
+    const p = look('breathing');
+    const at = (ms, k) => S.render(p, modules, ms)[k];
+    assert.deepStrictEqual(at(0, '2:1'), { r: 254, g: 0, b: 0, brightness: 7 }, 'upper (dash line): 12 % of 60');
+    assert.deepStrictEqual(at(2000, '2:1'), { r: 254, g: 0, b: 0, brightness: 60 }, 'full');
+    assert.deepStrictEqual(at(2000, '2:4'), { r: 0, g: 0, b: 254, brightness: 20 }, 'lower (footwell): its own colour and brightness');
+    assert.deepStrictEqual(at(4000, '2:1'), at(0, '2:1'));
+    assert.strictEqual(at(1000, '2:1').brightness, 34, 'half way up: 60 x (0.12 + 0.88 / 2)');
+    // the handles go with the group the setting says (Ambient Config has them lower: the default)
+    assert.strictEqual(at(2000, '1:2').b, 254);
+    assert.strictEqual(S.render(look('breathing', { handlesTo: 'top' }), modules, 2000)['1:2'].r, 254);
+    assert.strictEqual(S.render(look('breathing', { handlesTo: 'off' }), modules, 2000)['1:2'], undefined, 'handles left to the car');
 });
-test('wave: every module gets a hue by its position along the cabin; the dashboard leads', () => {
-    const p = { mode: 'wave', baseHue: 240, hueSpan: 60, periodS: 8, brightness: 100, zone: 'all' };
+test('wave: a band around the upper colour rolling bus by bus (the passenger doors, then the dash and the driver doors)', () => {
+    const p = look('wave');
     const sc = S.render(p, modules, 0);
     assert.strictEqual(Object.keys(sc).length, 19);
-    const hues = Object.keys(sc).map((k) => S.rgbToHsv(sc[k]).h);
-    assert.ok(new Set(hues.map((h) => Math.round(h))).size > 4, 'different phases: ' + hues.map((h) => Math.round(h)));
-    assert.ok(S.wavePosition(by(2, 1)) < S.wavePosition(by(1, 3)) && S.wavePosition(by(1, 3)) < S.wavePosition(by(1, 6)), 'dash < front door < rear door');
+    const colours = (bus) => Array.from(new Set(modules.filter((m) => m.bus === bus).map((m) => { const t = sc[S.key(m)]; return [t.r, t.g, t.b].join(); })));
+    assert.deepStrictEqual(colours(1), ['255,0,0'], 'bus 1 (Ambient Config\'s bus 0): the upper colour\'s hue, every module the same');
+    assert.deepStrictEqual(colours(2), ['255,0,255'], 'bus 2: a quarter of a wave behind, hue - 60');
+    assert.deepStrictEqual(S.render(p, modules, 5000), sc, 'once round in 5 s');
+    assert.strictEqual(sc['1:1'].brightness, 60);
+    // a module is a light for Ambient Config: its group, where it sits front to back (its own table), its bus from 0
+    assert.deepStrictEqual(S.lightOf(by(2, 1), 'bottom'), { part: 'upper', y: 0.15, bus: 1 }, 'dash line centre');
+    assert.deepStrictEqual(S.lightOf(by(1, 7), 'bottom'), { part: 'lower', y: 0.54, bus: 0 }, 'footwell passenger rear');
+    assert.ok(S.lightOf(by(2, 1)).y < S.lightOf(by(1, 3)).y && S.lightOf(by(1, 3)).y < S.lightOf(by(1, 6)).y, 'dash < front door < rear door');
+});
+test('a program saved by 0.5.0 (its own periods, palette and limits) still loads: its colours and brightness, normal speed', () => {
+    assert.deepStrictEqual(S.normalise({ mode: 'rainbow', periodS: 20, brightness: 70, zone: 'all' }), { mode: 'rainbow', top: { colour: { r: 160, g: 60, b: 254 }, brightness: 70 }, bottom: { colour: { r: 90, g: 200, b: 254 }, brightness: 70 }, speed: 2, handlesTo: 'bottom', zone: 'all' });
+    const b = S.normalise({ mode: 'breathing', colour: { r: 10, g: 20, b: 30 }, minBrightness: 10, maxBrightness: 90, periodS: 4, zone: 'dashboard' });
+    assert.deepStrictEqual([b.top, b.bottom, b.zone], [{ colour: { r: 10, g: 20, b: 30 }, brightness: 90 }, { colour: { r: 10, g: 20, b: 30 }, brightness: 90 }, 'dashboard']);
+    const f = S.normalise({ mode: 'fade', colours: [RED, BLUE, { r: 0, g: 254, b: 0 }], transitionMs: 2000, holdMs: 1000, brightness: 50 });
+    assert.deepStrictEqual([f.top.colour, f.bottom.colour, f.top.brightness], [RED, BLUE, 50]);
+    const w = S.normalise({ mode: 'wave', baseHue: 240, hueSpan: 60, periodS: 8, brightness: 100, speed: 3 });
+    assert.deepStrictEqual([w.top.colour, w.speed], [{ r: 0, g: 0, b: 255 }, 3]);
+    assert.strictEqual(S.normalise({ mode: 'wave', speed: 9 }).speed, 2, 'an unknown speed is normal');
+    assert.deepStrictEqual(S.normalise(S.normalise(look('fade', { speed: 1 }))), S.normalise(look('fade', { speed: 1 })), 'normalise is stable');
+    assert.ok(/^fade #FE0000 to #0000FE, slow$/.test(S.describe(look('fade', { speed: 1 }))));
+    assert.ok(/^rainbow, normal, 60%$/.test(S.describe(look('rainbow'))));
 });
 test('normalise fills defaults and keeps what is given; isAnimated; describe', () => {
     const p = S.normalise({ mode: 'solid', colour: { r: 1, g: 2, b: 3 } });

@@ -1,7 +1,8 @@
 'use strict';
 /**
  * lighting_service.js - everything the app does WITHOUT its screen: the lighting link, the factory gate, the
- * effects (open door, turn indicator, night), the driving modes, the last lighting at start, and the shutdown.
+ * car's signals (an open door's line handed back to BMW, the turn indicator's glow, night), the driving modes,
+ * the last lighting at start, and the shutdown.
  *
  * One LightingService per process. main.js makes it in the kit's background start (app.json "autostart": the
  * platform starts the app by itself, kit/runtime/mgu.js impl.background) and the screen, when it is opened, only
@@ -11,7 +12,10 @@
  * WHEN CUSTOM LIGHTING STOPS (the factory keeps priority). Three answers, asked on every signal that could change
  * them and every 1.5 s, and by the controller before every write:
  *
- *   release   a reason to hand every module back NOW (one release write each, or one a bus):
+ *   release   a reason to hand every module back NOW: one release to NAD 0 on each LIN bus, one after the other
+ *             (two writes for the whole cabin; Ambient Config's give-back, lighting_plan.planRelease), whatever the
+ *             setting for colour writes is. No read-back follows when the car was left: nothing more is asked of
+ *             a body controller that may be going to sleep.
  *               - the car is parked or in standby with nobody in it: VehicleCondition 1, 2 or 3
  *               - the factory ambient lighting was switched off in iDrive (oem_lighting.js factoryOn() === false),
  *                 unless the setting "Factory ambient lighting off" says to keep custom lighting
@@ -48,7 +52,6 @@ const { CarSignals, sidesOf } = require('./car_signals');
 // overwriting each other's colours (the check is Ambient Config's, others.js)
 const COMFORT_SOCK = '/run/iteriodev-comfort/ctl.sock';
 const IDLE_MS = 15 * 60000;            // the car's state unknown: this long without a sign of use = not in use
-const DOOR_MAX_MS = 5 * 60000;         // a door reported open longer than this stops blinking (a stuck switch, a door left open)
 const NIGHT_DIM = 0.5;
 const GATE_MS = 1500;
 const LINK_KEYS = ['backend', 'arm', 'unknownVariant', 'inflight', 'parked', 'simLatency', 'txMode', 'verify', 'refresh', 'busyRetries'];
@@ -80,7 +83,6 @@ class LightingService extends EventEmitter {
         this._gateOp = Promise.resolve();
         this._gateTimer = null; this._autoTimer = null;
         this._activeAt = this.now();
-        this._doorsSince = 0; this._doorsKey = '';
         this.stats = { releases: 0, lapses: 0, resumes: 0, starts: 0 };
     }
 
@@ -149,7 +151,7 @@ class LightingService extends EventEmitter {
         if (old) { try { await old.shutdown(); } catch (e) { /* */ } old.removeAllListeners(); }
         const retries = Number(settings.get('busyRetries'));
         const common = {
-            log, refreshSeconds: Number(settings.get('refresh')) || 10, frameMs: Number(settings.get('frame')) || 80,
+            log, refreshSeconds: Number(settings.get('refresh')) || 10, frameMs: Number(settings.get('frame')) || 40,
             // one request in flight unless the driver asked for the experiment: the TASU path is not proven to take two
             maxInFlight: settings.get('inflight') === '2' ? 2 : 1, parkedPolicy: settings.get('parked') === 'lenient' ? 'lenient' : 'strict',
             parked: () => (this.parked ? (this.parked.speed() === null ? null : !this.parked.moving()) : null),
@@ -170,6 +172,8 @@ class LightingService extends EventEmitter {
         ctl.on('refused', (why) => this.say('Cannot apply: ' + why, 4000));
         ctl.on('state', (s, err) => { if (s === 'disconnected' && err) this.say('Link: ' + err, 4000); });
         ctl.on('gated', () => this.gateTick().catch((e) => log.warn('gate: ' + e)));
+        // the read-back runs after Apply has answered: what it found is said when it is worth saying
+        ctl.on('verified', (r) => { if (r && r.missed) this.say(r.missed + ' module(s) had missed their colour: written again', 4000); });
         this.probing = true;
         try { await ctl.connect(); } finally { this.probing = false; }
         log.info('lighting link ' + ctl.kind + ': ' + ctl.state + (ctl.lastError ? ' (' + ctl.lastError + ')' : ''));
@@ -183,8 +187,8 @@ class LightingService extends EventEmitter {
         const now = this._linkNow();
         if (now !== this._linkKey) { this._linkKey = now; await this.makeController(); this.say('Lighting link: ' + this.ctl.kind); }
         if (key === 'refresh' || !key) this.ctl.refreshSeconds = Math.max(2, Math.min(254, Number(settings.get('refresh')) || 10));
-        if (key === 'frame' || !key) this.ctl.frameMs = Number(settings.get('frame')) || 80;
-        if (!key || /^(doorFlash|turnGlow|nightDim|drive)$/.test(key)) this.syncEffects();
+        if (key === 'frame' || !key) this.ctl.frameMs = Number(settings.get('frame')) || 40;
+        if (!key || /^(doorRelease|turnGlow|nightDim|drive)$/.test(key)) this.syncEffects();
         if (!key || /^(oemOffRule|conflict)$/.test(key)) await this.gateTick();
     }
 
@@ -226,7 +230,8 @@ class LightingService extends EventEmitter {
         if (why && (ctl.program || ctl.driven.size)) {
             if (ctl.program) this.suspended = still(ctl.program);
             this.busy = true;
-            try { if (release) { await ctl.restoreOem(); this.stats.releases++; } else { await ctl.lapse(hold); this.stats.lapses++; } } finally { this.busy = false; }
+            // (the car left: the release and nothing after it; the factory lighting switched off with someone in the car: one read-back)
+            try { if (release) { await ctl.restoreOem({ verify: this.carState() !== 'away' }); this.stats.releases++; } else { await ctl.lapse(hold); this.stats.lapses++; } } finally { this.busy = false; }
             this.log.info('custom lighting ' + (release ? 'released' : 'left to lapse') + ': ' + why);
             this.say('Custom lighting ' + (release ? 'released' : 'stopped') + ': ' + why, 4500);
         } else if (!why && this.lastGate && this.suspended && !ctl.program && this.settings.get('resume') === 'on') {
@@ -240,17 +245,19 @@ class LightingService extends EventEmitter {
         this.lastGate = why;
     }
 
-    /* ---------- effects over the lighting ---------- */
-    /** The effects the settings and the car ask for now, handed to the controller (which does nothing when unchanged). */
+    /* ---------- the car's signals ---------- */
+    /**
+     * What the settings and the car ask for now, handed to the controller (which does nothing when unchanged).
+     * doors: the open doors. Their contour lines are handed back to BMW (the factory handback, once) and left alone
+     * until they close, so the car shows its own door warning; nothing is blinked or coloured by this app. A door
+     * that stays open keeps its line with BMW for as long as it is open: there is nothing to time out, because
+     * nothing is being written to it. A lost door signal counts as every door closed.
+     */
     syncEffects() {
         const { settings, car, ctl } = this;
         if (!ctl || !car || this.stopped) return null;
         const gated = !!this.gate(), lost = car.lost();
-        let doors = settings.get('doorFlash') === 'on' && !gated && !lost.doors ? car.doors() : [];
-        // (a door reported open for minutes on end: a stuck switch or a door left open; stop blinking until it changes)
-        const key = car.doors().join();
-        if (key !== this._doorsKey) { this._doorsKey = key; this._doorsSince = this.now(); }
-        if (doors.length && this.now() - this._doorsSince > DOOR_MAX_MS) doors = [];
+        const doors = settings.get('doorRelease') !== 'off' && !gated && !lost.doors ? car.doors() : [];
         const turn = settings.get('turnGlow') === 'on' && !gated && !lost.turn ? sidesOf(car.turn(), settings.get('drive') === 'lhd' ? 'lhd' : 'rhd') : [];
         const dim = settings.get('nightDim') === 'on' && car.night() === true ? NIGHT_DIM : 1;
         const p = ctl.setEffects({ doors, turn, dim });
@@ -347,4 +354,4 @@ function service(o) {
     return instance;
 }
 
-module.exports = { LightingService, service, still, IDLE_MS, DOOR_MAX_MS, NIGHT_DIM, GATE_MS, LINK_KEYS, COMFORT_SOCK };
+module.exports = { LightingService, service, still, IDLE_MS, NIGHT_DIM, GATE_MS, LINK_KEYS, COMFORT_SOCK };

@@ -63,8 +63,17 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
   lower), the BDC's library colours, saved colours.
 - **Dual Colour:** upper and lower lighting with their own colour and brightness, swap, copy, save, Apply both.
   The door-handle lights belong to whichever group you choose.
-- **Modes:** Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave, each with its settings; complete
-  configurations saved as presets.
+- **Modes:** Solid, Dual, and six animations: Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep,
+  Sport Pulse. From 0.5.1 the animations are the MGU App Kit Ambient Config's own: its `scenes.js` is in the
+  app unchanged (`ambient_config_scenes.js`, MIT) and computes every colour; the knobs are its knobs (the two
+  colours and Slow / Normal / Fast). Complete configurations saved as presets.
+- **Whole-bus writes (0.5.1, Ambient Config's update method):** one command reaches every module of a LIN
+  bus, so a colour is 2 writes instead of 19 and Rainbow, Fade and Wave are 2 writes a frame; each frame is
+  made only when the last one is out, so none is ever sent late.
+- **An open door (0.5.1):** that door's contour line is handed back to BMW's own warning light and left
+  alone until the door closes; the rest of the cabin keeps its colour or animation.
+- **Handing back (0.5.1):** Restore OEM, locking the car and switching the factory ambient lighting off
+  return all 19 modules with two commands (one a bus, one after the other).
 - **Rotary first:** every control is reachable and adjustable with the iDrive knob; touch works where the
   renderer routes it; - / + buttons remain for a unit without the controller gate.
 - **Honest restore:** Restore OEM releases every driven module and reports exactly what was accepted.
@@ -78,7 +87,8 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
   sends only `2E DA5E` / `2E E3D1` to the BDC body (0x40) and `10 03` when asked for a session; the
   allow list is enforced in code (`lighting_protocol.js checkRequest`) and covered by tests.
 - Lighting changes are blocked unless the car is known to be parked (fail closed when the speed is unknown).
-- One diagnostic write at a time; animation frames are paced to the measured transport and never queue up.
+- One diagnostic request at a time; an animation frame is made only when the last one is written, so frames
+  never queue up; a write nobody answers is never sent again for that reason.
 - Every write carries a timeout (ZEIT, 10 s by default, 30 s cap): if the app dies, the BDC returns to
   OEM lighting by itself. Restore OEM writes the modules inactive and stops.
 - Nothing is coded, flashed or persisted in the car. The laptop tool only reads.
@@ -89,4 +99,6 @@ The kit is expected at `../research/cauliflowermossgrape_idrive7-apps` (or set `
 Free for personal use; commercial use (charging to install it, selling or bundling it, advertising with
 it) needs a commercial licence agreed with the author first, and anyone distributing a modified version
 must publish their changes under the same terms. The full text is in [LICENSE](LICENSE). The MGU App Kit
-this builds on keeps its own MIT licence; BMW's SDK is never distributed.
+this builds on keeps its own MIT licence, and so do the two files of its Ambient Config app that are in
+`app/ambient_rgb/` unchanged (`ambient_config_scenes.js`, `ambient_config_lin.js`; the notice is
+`ambient_config_notice.js`, the details [THIRD_PARTY.md](THIRD_PARTY.md)). BMW's SDK is never distributed.

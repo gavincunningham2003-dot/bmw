@@ -1,7 +1,7 @@
-# UNVERIFIED.md: what 0.5.0 has NOT been seen doing on the car
+# UNVERIFIED.md: what 0.5.1 has NOT been seen doing on the car
 
-Everything in 0.5.0 passes on the laptop: the simulated body controller, the kit's real runtime, the emulator.
-**None of 0.5.0 has run on the G20.** The head unit's apps do not start until its coding is restored
+Everything in 0.5.1 passes on the laptop: the simulated body controller, the kit's real runtime, the emulator.
+**None of 0.5.0 or 0.5.1 has run on the G20.** The head unit's apps do not start until its coding is restored
 (2026-11-05), so the list below is everything the car still has to confirm. Until an item is confirmed,
 treat it as a claim about the design, not about the car.
 
@@ -9,6 +9,34 @@ What the car HAS confirmed (PROTOCOL_FINDINGS.md, laptop over ENET, 2026-11-04 a
 `2E DA5E` / `2E E3D1` in the default session, R G B order, 0xFF = no change, ZEIT self-revert, the release
 frame, the 19 modules and their locations on two buses, the read-back, and the whole-bus write (NAD 0) reaching
 12 of 12 on bus 2 and 6 of 7, then 7 of 7, on bus 1.
+
+## New in 0.5.1 (check these first, parked)
+
+A. **BMW's own light on an open door's line.** The app hands that door's contour-line module back with the
+   factory handback and writes nothing to it while the door is open. What the car then shows on it (its red
+   door warning, its normal ambient colour, or nothing) is the car's doing and depends on its equipment and
+   coding; it has not been watched on this G20. If the line just shows the factory colour, that is the car
+   having no door-warning function on that line, not a fault of the handback.
+ B. **The door signal**, as item 11: if the wrong door's line goes back, or none, report what Diagnostics shows
+   under "Signals". A wrong reading can only hand a line back to BMW, never write to one.
+ C. **Whole-bus writes as the default, from inside the head unit.** Seen from the laptop over ENET only (12 of
+   12 on bus 2; 6 of 7, then 7 of 7 on bus 1). If a module keeps the factory colour after Apply, the
+   read-back 1.5 s later should write it on its own and Diagnostics then lists it under "single for". If that
+   does not happen, set *Writes to the car* to *One per module*.
+ D. **Animation smoothness.** Rainbow, Fade and Wave are two writes a frame, so the frame rate is half the
+   gateway's writes per second: the kit's Ambient Config reports about 200 ms a write through the head unit,
+   which would be 2 to 3 frames a second. Not measured here. Diagnostics shows "Animation: N frames/s".
+ E. **The read-back's duration.** A status read answers "pending" and takes seconds on the car, and the writes
+   wait meanwhile. With the 10 s Keep-alive a read of both buses that takes longer than about 8 s would let
+   the colour drop to the factory lighting for a moment, about 10 s after an Apply, before the next keep-alive
+   brings it back. If that is ever seen: raise *Keep-alive* (15 or 20 s).
+ F. **The two-write handback** (NAD 0, `ZUSTAND 0`) on lock, on factory lighting off, on Restore OEM and at the
+   platform's stop: simulated, and seen from the laptop only as single releases. Watch that all 19 go back at
+   once; a module that does not is released on its own after the read-back (not when the car was left: it
+   then returns by itself when its ZEIT runs out, 5 or 10 s).
+ G. **The animations' look on the real modules**: the brightness sweep of Welcome, Breathing down to 12 %, the
+   wave's two buses a quarter of a wave apart. The figures are the reference's and are exact in simulation;
+   how the LEDs render them is unseen.
 
 ## The app on the head unit at all
 
@@ -34,10 +62,10 @@ frame, the 19 modules and their locations on two buses, the read-back, and the w
    With the kit's older installer (`mgu-app-install.sh`) the app is listed as `manually` and is NOT started
    by the platform: the lighting then runs only from the first time the app is opened until the platform stops
    it for inactivity.
-6. **The platform's shutdown request.** The kit ends the process 200 ms after it. One release write a module
-   is about 19 x 15 ms, so with single writes the release may not finish; what did not get out returns to
-   the factory lighting when its ZEIT runs out (10 s by default, 30 s at most). With whole-bus writes it is
-   two writes. Which signal the platform really sends (its shutdown event, SIGTERM, SIGKILL) is not known.
+6. **The platform's shutdown request.** The kit ends the process 200 ms after it. From 0.5.1 the release is
+   two writes (one NAD 0 release a bus) whatever the write setting; at the reported 200 ms a write through
+   the gateway the second may still not get out, and what did not returns to the factory lighting when its
+   ZEIT runs out (5 s for an animation, 10 s by default for a still colour, 30 s at most). Which signal the platform really sends (its shutdown event, SIGTERM, SIGKILL) is not known.
 7. **The head unit going to sleep with the app running**, and that nothing the app does keeps the car awake
    after locking. By design nothing is written or polled on the body controller once the car is left; this
    needs a battery-drain check on the car (lock, wait, read the BDC's sleep state or current).
@@ -60,9 +88,9 @@ frame, the 19 modules and their locations on two buses, the read-back, and the w
 
 11. **Door switches**: that `DoorsWindowsRoofMirrors.CentralLockingSystemAndPanelStatus` reaches the app and
     that DRD / PSD / DRDR / PSDR are the driver / passenger front / rear doors on a right-hand-drive car.
-12. **Door flash on the lights**: red at 400 ms on / 400 ms dark on one module. Whether the module follows
-    that rate, and how it looks, is unseen. The four door contour lines are bus 1 NAD 3 and 6 (passenger) and
-    bus 2 NAD 8 and 11 (driver) by the car's own location table.
+12. **The door handback** (0.5.1; item A above). The app's own red blink of 0.5.0 is removed. The four door
+    contour lines are bus 1 NAD 3 and 6 (passenger) and bus 2 NAD 8 and 11 (driver) by the car's own
+    location table.
 13. **Indicators**: that `Light.StatusFunctionsIndicators` reaches the app, its values on this car, and the
     right-hand-drive mapping (left indicator = passenger side). If the glow shows on the wrong side, switch
     *Steering wheel side* in Settings and report it.
@@ -85,7 +113,9 @@ frame, the 19 modules and their locations on two buses, the read-back, and the w
 20. **Brightness other than 100** on the real modules (night dimming sends 50): the brightness byte was only
     ever written as 100 or 0 on the car.
 
-## Not part of 0.5.0
+## Not part of 0.5.1
 
-- The roof lamp unit does not follow these writes (it is not one of the 19 modules).
+- **Roof lighting.** The roof lamp unit is a separate control unit, not one of the body controller's 19 LIN
+  modules, and it does not follow these writes. No supported colour command for it is established (its status
+  routine answers, which says nothing about a lamp), so nothing was built and nothing pretends to drive it.
 - Item 6 of the brief was skipped as asked.

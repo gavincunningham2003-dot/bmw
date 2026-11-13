@@ -1,6 +1,7 @@
 'use strict';
 /* 0.5.0: the factory gate (factory lighting off, car parked / left, signals missing or lost), the background
- * service and its shutdown, the effects (open door red, indicator green, night), and the transport rules
+ * service and its shutdown, the car's signals (an open door: its line back to BMW since 0.5.1, indicator green,
+ * night), and the transport rules
  * (no reply is never resent, busy retries configurable, a maximum duration for one command). */
 const fs = require('fs');
 const os = require('os');
@@ -25,7 +26,7 @@ const SPEC = JSON.parse(fs.readFileSync(path.join(STAGE, 'app.json'), 'utf8'));
 const COND = 'de.bmw.infrastructure.VehicleCondition', COMFORT = 'de.bmw.infotainment.misc.ComfortFunctionIuK', AMBIENT = 'de.bmw.body.interiorillumination.AmbientLight';
 const DOORS = 'de.bmw.body.DoorsWindowsRoofMirrors', LIGHT = 'de.bmw.body.Light', VEHICLE = 'de.bmw.infotainment.vehicle.Vehicle';
 const BLUE = { mode: 'solid', colour: { r: 0, g: 0, b: 254 }, brightness: 100, zone: 'all' };
-const RAINBOW = { mode: 'rainbow', periodS: 20, brightness: 100, zone: 'all' };
+const RAINBOW = { mode: 'rainbow', zone: 'all' };
 const FOOT = { mode: 'solid', colour: { r: 0, g: 254, b: 0 }, brightness: 100, zone: 'footwells' };
 // the G20's four door contour lines, where the body controller reported them (2026-11-04)
 const LINE = { passengerFront: '1:3', passengerRear: '1:6', driverFront: '2:8', driverRear: '2:11' };
@@ -132,8 +133,8 @@ test('factory ambient lighting switched OFF: custom lighting is released at once
     await settle(svc);
     assert.strictEqual(svc.ctl.program, null);
     assert.ok(allOem(svc), 'every module handed back');
-    assert.strictEqual(writes(bdc).length - before, 19, 'one release each, nothing else');
-    assert.ok(writes(bdc).slice(before).every((r) => r.data[3] === 0));
+    assert.deepStrictEqual(writes(bdc).slice(before).map(keyOf), ['1:0', '2:0'], 'one release a bus (NAD 0), bus 1 then bus 2, nothing else');
+    assert.ok(writes(bdc).slice(before).every((r) => r.data[3] === 0 && r.data.slice(4).every((b) => b === 0)));
     assert.ok(/released.*switched off/.test(say.join('|')), say.join('|'));
     const r = await svc.apply(BLUE);
     assert.ok(!r.ok && /factory ambient lighting is switched off/.test(r.reason));
@@ -309,18 +310,19 @@ test('first install: simulated BDC, disarmed, nothing applied at start, every ef
     assert.strictEqual(def('backend'), 'mock');
     assert.strictEqual(def('arm'), 'off');
     assert.strictEqual(def('autoApply'), 'off');
-    ['doorFlash', 'turnGlow', 'nightDim', 'resume', 'modeFollow', 'sportPulse', 'welcome'].forEach((k) => assert.strictEqual(def(k), 'off', k));
-    assert.strictEqual(def('inflight'), '1'); assert.strictEqual(def('txMode'), 'individual');
+    ['turnGlow', 'nightDim', 'resume', 'modeFollow', 'sportPulse', 'welcome'].forEach((k) => assert.strictEqual(def(k), 'off', k));
+    // (0.5.1: whole-bus writes by default, seen on this car on 2026-11-12; an open door's line goes back to BMW)
+    assert.strictEqual(def('inflight'), '1'); assert.strictEqual(def('txMode'), 'broadcast'); assert.strictEqual(def('doorRelease'), 'on');
     assert.strictEqual(SPEC.autostart, true);
     const { svc, bdc } = await makeService({});
     assert.strictEqual(svc.ctl.kind, 'mock');
     assert.strictEqual(writes(bdc).length, 0);
     assert.strictEqual(svc.ctl.program, null);
 });
-test('the service runs without the screen: the last lighting at start, animation, door flash and the factory gate all with no UI', async () => {
+test('the service runs without the screen: the last lighting at start, animation, the door handback and the factory gate all with no UI', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ambient-bg-'));
     fs.writeFileSync(path.join(dir, 'favourites.json'), JSON.stringify({ favourites: [], presets: [], last: { program: RAINBOW, at: 1 } }));
-    const clock = fakeClock(), settings = fakeSettings({ autoApply: 'on', doorFlash: 'on' }), signals = fakeSignals(), bdc = new MockBdc({ now: clock.now });
+    const clock = fakeClock(), settings = fakeSettings({ autoApply: 'on' }), signals = fakeSignals(), bdc = new MockBdc({ now: clock.now });
     const svc = new LightingService({ settings, signals, log: null, dataDir: dir, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: () => 1, clearInterval() {},
         parkedWatch: () => ({ speed: () => 0, moving: () => false }), controller: (c) => new MockLightingController(Object.assign({}, c, { bdc })) });
     await svc.start();
@@ -332,8 +334,9 @@ test('the service runs without the screen: the last lighting at start, animation
     await clock.advance(2000);
     assert.ok(svc.ctl.stats.frames > f, 'the animation runs with no screen');
     signals.H[DOORS].CentralLockingSystemAndPanelStatus({ statusDoorSwitchDRD: 1 });
-    await tick(); await clock.advance(100);
-    assert.deepStrictEqual(phys(svc, LINE.driverFront).slice(0, 4), [254, 0, 0, 100]);
+    await tick(); await clock.advance(500);
+    assert.strictEqual(phys(svc, LINE.driverFront)[4], 'oem', 'the open door\'s line is BMW\'s');
+    assert.strictEqual(phys(svc, '2:1')[4], 'custom', 'the rainbow runs on around it');
     signals.H[COND].VehicleCondition({ statusConditionVehicle: 2 });
     await settle(svc);
     assert.ok(allOem(svc));
@@ -385,18 +388,22 @@ test('main.js: the background start makes the service; opening the screen reuses
     assert.ok(sigterm <= 1);
 });
 test('shutdown with effects and an animation running: both stop, the release goes out once, a dead transport is reported not hidden', async () => {
-    const { svc, car, bdc, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+    const { svc, car, bdc, clock } = await makeService({ strict: true, sets: { turnGlow: 'on' } });
     car.condition(5); car.factory(1);
     await svc.apply(RAINBOW);
-    car.doors({ statusDoorSwitchPSD: 1 });
+    car.doors({ statusDoorSwitchPSD: 1 }); car.turn(6);
     await tick(); await clock.advance(1000);
+    const before = writes(bdc).length;
     const r = await svc.stop('test');
     assert.strictEqual(r.ok, true);
     assert.ok(allOem(svc));
+    assert.deepStrictEqual(writes(bdc).slice(before).map(keyOf), ['1:0', '2:0'], 'the whole cabin back in two writes, well inside the platform\'s 200 ms');
     const n = writes(bdc).length;
+    const reads = bdc.requests.length;
     car.doors({ statusDoorSwitchDRD: 1 });                     // a late event
     await clock.advance(5000);
     assert.strictEqual(writes(bdc).length, n, 'nothing after the stop');
+    assert.strictEqual(bdc.requests.length, reads, 'not even a read-back');
     assert.strictEqual(clock.pending(), 0);
     assert.strictEqual(svc.intervalCleared, true);
     // the transport already gone at shutdown: said, and the modules lapse by themselves
@@ -413,7 +420,7 @@ test('changing a link setting replaces the controller without leaving the old on
     car.condition(5); car.factory(1);
     await svc.apply(RAINBOW);
     const old = svc.ctl;
-    settings.set('txMode', 'broadcast');
+    settings.set('txMode', 'individual');
     for (let i = 0; i < 10; i++) await tick();
     assert.strictEqual(made.length, 2);
     assert.notStrictEqual(svc.ctl, old);
@@ -424,7 +431,14 @@ test('changing a link setting replaces the controller without leaving the old on
     assert.strictEqual(old.stats.frames, f, 'the old controller\'s ticker is gone');
 });
 
-/* ================= an open door: red ================= */
+/* ================= an open door: its contour line goes back to BMW ================= */
+/* 0.5.1: the app no longer blinks an open door's line red. It hands that one module back with the factory
+ * handback (ZUSTAND 0), writes nothing to it while the door is open (no single write, no keep-alive, no whole-bus
+ * write on its bus), and gives it the colour of the moment when the door closes. BMW shows its own warning. */
+const DOOR_FIELD = { driverFront: 'statusDoorSwitchDRD', passengerFront: 'statusDoorSwitchPSD', driverRear: 'statusDoorSwitchDRDR', passengerRear: 'statusDoorSwitchPSDR' };
+const isRelease = (r) => r.data[3] === 0 && r.data.slice(4).every((b) => b === 0);
+const isRed = (r) => r.data[3] === 1 && r.data[5] >= 250 && r.data[6] === 0 && r.data[7] === 0;
+const isBlack = (r) => r.data[3] === 1 && r.data[4] === 0;
 test('door signal decoding: each of the four door switches by name or number; implausible and invalid are not "open"', () => {
     assert.deepStrictEqual(CS.doorsOf({ statusDoorSwitchDRD: 1 }), ['driverFront']);
     assert.deepStrictEqual(CS.doorsOf({ statusDoorSwitchPSD: 'BEIFAHRERTUER_IST_OFFEN' }), ['passengerFront']);
@@ -434,159 +448,189 @@ test('door signal decoding: each of the four door switches by name or number; im
     assert.deepStrictEqual(CS.doorsOf(null), []);
     assert.strictEqual(SPEC.signals[DOORS].CentralLockingSystemAndPanelStatus, 's');
 });
-test('open door red flash is OFF by default: a door opens and nothing is written', async () => {
-    const { svc, car, bdc, clock } = await makeService({ strict: true });
-    car.condition(5); car.factory(1);
-    car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await clock.advance(2000);
-    assert.strictEqual(writes(bdc).length, 0);
+test('the red door blink is gone: no setting for it, nothing in the overlay, and the handback is on from the first start', () => {
+    assert.strictEqual(SPEC.settings.find((s) => s.key === 'doorFlash'), undefined);
+    assert.strictEqual(SPEC.settings.find((s) => s.key === 'doorRelease').default, 'on');
+    assert.strictEqual(O.RED, undefined);
+    // an open door takes its line OUT of the scene; it puts no colour in
+    const mods = [{ bus: 2, nad: 8, locationId: 0x05 }, { bus: 2, nad: 1, locationId: 0x15 }];
+    const base = { '2:8': { r: 1, g: 2, b: 3, brightness: 50 }, '2:1': { r: 1, g: 2, b: 3, brightness: 50 } };
+    assert.deepStrictEqual(O.compose(base, mods, { doors: ['driverFront'], turn: [] }, 0), { '2:1': base['2:1'] });
+    assert.deepStrictEqual(O.compose({}, mods, { doors: ['driverFront'], turn: [] }, 0), {}, 'and nothing over the car\'s own lighting');
+    assert.strictEqual(O.moving({ doors: ['driverFront'], turn: [] }, mods), false, 'an open door needs no frames');
+    assert.deepStrictEqual(O.releasedKeys({ doors: ['driverFront'] }, mods), ['2:8']);
 });
-test('each door flashes its own contour line red and only that; it stops at once when the door closes and the applied colour is back', async () => {
+test('each door: ONE release to its own contour line, nothing else touched, nothing written to it while it is open, the colour back when it closes', async () => {
     for (const door of Object.keys(LINE)) {
-        const { svc, car, bdc, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+        const { svc, car, bdc, clock } = await makeService({ strict: true });
         car.condition(5); car.factory(1);
         await svc.apply(BLUE);
-        const n = writes(bdc).length, field = { driverFront: 'statusDoorSwitchDRD', passengerFront: 'statusDoorSwitchPSD', driverRear: 'statusDoorSwitchDRDR', passengerRear: 'statusDoorSwitchPSDR' }[door];
-        car.doors({ [field]: 1 });
-        await tick(); await clock.advance(50);
-        assert.deepStrictEqual(phys(svc, LINE[door]).slice(0, 4), [254, 0, 0, 100], door + ': red');
-        await clock.advance(400);
-        assert.strictEqual(phys(svc, LINE[door])[3], 0, door + ': dark between the flashes');
-        await clock.advance(400);
-        assert.deepStrictEqual(phys(svc, LINE[door]).slice(0, 4), [254, 0, 0, 100], door + ': red again');
-        const touched = new Set(writes(bdc).slice(n).map(keyOf));
-        assert.deepStrictEqual(Array.from(touched), [LINE[door]], door + ': no other module was written while it flashed');
-        // every other door's line still shows the applied colour
-        Object.keys(LINE).filter((d) => d !== door).forEach((d) => assert.deepStrictEqual(phys(svc, LINE[d]).slice(0, 3), [0, 0, 254]));
-        car.doors({});                                           // closed
+        await clock.advance(2000);                              // (the background read-back is done)
+        const n = writes(bdc).length, bus = LINE[door].split(':')[0];
+        car.doors({ [DOOR_FIELD[door]]: 1 });
         await tick(); await svc.ctl.scheduler.drain();
-        assert.deepStrictEqual(phys(svc, LINE[door]).slice(0, 4), [0, 0, 254, 100], door + ': the applied colour at once');
+        const opened = writes(bdc).slice(n);
+        assert.deepStrictEqual(opened.map(keyOf), [LINE[door]], door + ': one write, to that door\'s line');
+        assert.ok(isRelease(opened[0]), door + ': the factory handback (ZUSTAND 0), not a colour');
+        assert.strictEqual(phys(svc, LINE[door])[4], 'oem', door + ': BMW has it');
+        assert.ok(!svc.ctl.driven.has(LINE[door]) && !svc.ctl.scene[LINE[door]]);
+        svc.ctl.slaves.filter((s) => S.key(s) !== LINE[door]).forEach((s) => assert.deepStrictEqual(phys(svc, S.key(s)), [0, 0, 254, 100, 'custom'], door + ': ' + S.key(s) + ' keeps the colour'));
+        // open for a while: keep-alives go on for the others, the door's line is never written, its bus never as a whole
+        await clock.advance(30000);
+        const during = writes(bdc).slice(n + 1);
+        assert.ok(during.length > 18, door + ': the others are kept alive');
+        assert.ok(during.every((r) => keyOf(r) !== LINE[door]), door + ': not one write to the open door\'s line');
+        assert.ok(during.every((r) => keyOf(r) !== bus + ':0'), door + ': no whole-bus write on its bus');
+        assert.ok(during.some((r) => keyOf(r) === (bus === '1' ? '2' : '1') + ':0'), door + ': the other bus is still written whole');
+        assert.ok(writes(bdc).slice(n).every((r) => !isRed(r) && !isBlack(r)), door + ': no red and no black from the app');
+        assert.strictEqual(phys(svc, LINE[door])[4], 'oem');
+        svc.ctl.slaves.filter((s) => S.key(s) !== LINE[door]).forEach((s) => assert.strictEqual(phys(svc, S.key(s))[4], 'custom', door + ': ' + S.key(s) + ' never lapsed'));
+        // closed
         const m = writes(bdc).length;
-        await clock.advance(3000);
-        assert.ok(writes(bdc).slice(m).every((r) => !(r.data[5] === 254 && r.data[6] === 0 && r.data[7] === 0)), door + ': no red after it closed');
+        car.doors({});
+        await tick(); await svc.ctl.scheduler.drain();
+        assert.deepStrictEqual(writes(bdc).slice(m).map(keyOf), [LINE[door]], door + ': one write gives it the colour back');
+        assert.deepStrictEqual(phys(svc, LINE[door]), [0, 0, 254, 100, 'custom']);
         assert.strictEqual(svc.ctl.program.mode, 'solid');
+        const k = writes(bdc).length;
+        await clock.advance(12000);
+        assert.ok(writes(bdc).slice(k).some((r) => keyOf(r) === bus + ':0'), door + ': its bus is written whole again');
     }
 });
-test('several doors open at once flash together; one closing leaves the others flashing', async () => {
-    const { svc, car, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+test('several doors open at once: each line released on its own; one closing leaves the others with BMW', async () => {
+    const { svc, car, bdc, clock } = await makeService({ strict: true });
     car.condition(5); car.factory(1);
     await svc.apply(BLUE);
-    car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchPSDR: 1, statusDoorSwitchPSD: 1 });
-    await tick(); await clock.advance(50);
-    ['driverFront', 'passengerRear', 'passengerFront'].forEach((d) => assert.deepStrictEqual(phys(svc, LINE[d]).slice(0, 4), [254, 0, 0, 100], d));
-    assert.deepStrictEqual(phys(svc, LINE.driverRear).slice(0, 3), [0, 0, 254]);
-    car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchPSD: 1 });
-    await tick(); await clock.advance(820);
-    assert.deepStrictEqual(phys(svc, LINE.passengerRear).slice(0, 4), [0, 0, 254, 100], 'the closed door is back on the applied colour');
-    assert.deepStrictEqual(phys(svc, LINE.driverFront).slice(0, 4), [254, 0, 0, 100]);
-    assert.deepStrictEqual(svc.ctl.effects.doors, ['driverFront', 'passengerFront']);
-});
-test('a door over an animation: the animation keeps running in step and is neither restarted nor re-applied', async () => {
-    const { svc, car, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
-    car.condition(5); car.factory(1);
-    await svc.apply(RAINBOW);
-    await clock.advance(3000);
-    const ctl = svc.ctl, phase0 = ctl.phase0, program = ctl.program, applies = ctl.stats.applies;
-    car.doors({ statusDoorSwitchDRDR: 1 });
-    await tick(); await clock.advance(50);
-    assert.deepStrictEqual(phys(svc, LINE.driverRear).slice(0, 3), [254, 0, 0]);
-    const other = phys(svc, '2:1');
-    assert.ok(!(other[0] === 254 && other[1] === 0 && other[2] === 0), 'the rest of the cabin carries on with the rainbow');
     await clock.advance(2000);
-    car.doors({});
-    await tick(); await clock.advance(400);
-    assert.strictEqual(ctl.phase0, phase0, 'the time origin was not touched');
-    assert.strictEqual(ctl.program, program);
-    assert.strictEqual(ctl.stats.applies, applies, 'not applied again');
-    // the door's line shows exactly what the rainbow says for this moment, as its neighbours do
-    const want = S.render(program, ctl.slaves, clock.now(), { phase0 })[LINE.driverRear];
-    const got = phys(svc, LINE.driverRear);
-    assert.ok(Math.abs(got[0] - want.r) < 40 && Math.abs(got[1] - want.g) < 40 && Math.abs(got[2] - want.b) < 40, JSON.stringify([got, want]));
-    assert.deepStrictEqual(phys(svc, LINE.driverRear).slice(0, 3), phys(svc, LINE.driverFront).slice(0, 3));
+    const n = writes(bdc).length;
+    // the driver's two doors are on the same LIN bus: two single releases, never the bus
+    car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchDRDR: 1, statusDoorSwitchPSD: 1 });
+    await tick(); await svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf).sort(), [LINE.passengerFront, LINE.driverRear, LINE.driverFront].sort());
+    assert.ok(writes(bdc).slice(n).every(isRelease));
+    ['driverFront', 'driverRear', 'passengerFront'].forEach((d) => assert.strictEqual(phys(svc, LINE[d])[4], 'oem', d));
+    assert.deepStrictEqual(phys(svc, LINE.passengerRear).slice(0, 3), [0, 0, 254]);
+    assert.deepStrictEqual(phys(svc, '2:1').slice(0, 3), [0, 0, 254], 'the dash, on the driver doors\' bus, keeps its colour');
+    car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchPSD: 1 });
+    await tick(); await svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(phys(svc, LINE.driverRear), [0, 0, 254, 100, 'custom'], 'the closed door is back on the applied colour');
+    assert.strictEqual(phys(svc, LINE.driverFront)[4], 'oem');
+    assert.deepStrictEqual(svc.ctl.effects.doors, ['driverFront', 'passengerFront']);
+    assert.deepStrictEqual(svc.ctl.status().released.sort(), [LINE.passengerFront, LINE.driverFront].sort());
 });
-test('a door with nothing applied: red over the factory lighting, and the module is handed back when it closes', async () => {
-    const { svc, car, bdc, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+test('a door while the car has its own lighting: nothing is written at all; a program that leaves the door lines to the car: the same', async () => {
+    const { svc, car, bdc, clock } = await makeService({ strict: true });
     car.condition(5); car.factory(1);
     car.doors({ statusDoorSwitchPSD: 1 });
-    await tick(); await clock.advance(50);
-    assert.deepStrictEqual(phys(svc, LINE.passengerFront).slice(0, 4), [254, 0, 0, 100]);
-    assert.strictEqual(phys(svc, '2:1')[4], 'oem', 'nothing else is touched');
+    await tick(); await clock.advance(5000);
     car.doors({});
-    await tick(); await svc.ctl.scheduler.drain();
-    assert.strictEqual(phys(svc, LINE.passengerFront)[4], 'oem');
-    assert.strictEqual(svc.ctl.driven.size, 0);
-    const n = writes(bdc).length;
-    await clock.advance(60000);
-    assert.strictEqual(writes(bdc).length, n, 'and nothing keeps being written');
-    // a program that leaves the door lines to the car: same
+    await tick(); await clock.advance(5000);
+    assert.strictEqual(writes(bdc).length, 0);
     await svc.apply(FOOT);
-    car.doors({ statusDoorSwitchPSD: 1 }); await tick(); await clock.advance(50);
+    const n = writes(bdc).length;
+    car.doors({ statusDoorSwitchPSD: 1 }); await tick(); await svc.ctl.scheduler.drain();
     car.doors({}); await tick(); await svc.ctl.scheduler.drain();
+    assert.strictEqual(writes(bdc).length, n, 'the door lines were never ours');
     assert.strictEqual(phys(svc, LINE.passengerFront)[4], 'oem');
     assert.deepStrictEqual(phys(svc, '2:4').slice(0, 3), [0, 254, 0], 'the footwells keep their colour');
 });
 test('the door\'s module comes from the body controller\'s location table, not from a fixed LIN address', async () => {
     // another car: the driver front door line (location 0x05) sits on bus 1 NAD 2; bus 2 NAD 8 is a footwell
-    const { svc, car, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' }, mock: { slaves: [0x15, 0x05, 0x0C], slaves2: [0x13, 0x17, 0x09, 0x10, 0x01, 0x02, 0x03, 0x04] } });
+    const { svc, car, bdc } = await makeService({ strict: true, mock: { slaves: [0x15, 0x05, 0x0C], slaves2: [0x13, 0x17, 0x09, 0x10, 0x01, 0x02, 0x03, 0x04] } });
     car.condition(5); car.factory(1);
+    await svc.apply(BLUE);
+    const n = writes(bdc).length;
     car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await clock.advance(50);
-    assert.deepStrictEqual(phys(svc, '1:2').slice(0, 3), [254, 0, 0]);
-    assert.strictEqual(phys(svc, '2:8')[4], 'oem');
+    await tick(); await svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['1:2']);
+    assert.strictEqual(phys(svc, '1:2')[4], 'oem');
+    assert.deepStrictEqual(phys(svc, '2:8').slice(0, 3), [0, 0, 254]);
     assert.strictEqual(O.doorOf({ locationId: 0x05 }), 'driverFront');
     assert.strictEqual(O.doorOf({ locationId: 0x07 }), null, 'a door opener is not the contour line');
     assert.strictEqual(O.doorOf({ locationId: 0x01 }), null);
 });
-test('door flash never reaches anything but an interior door contour line through the allow-listed write', async () => {
-    const { svc, car, bdc, clock } = await makeService({ strict: true, sets: { doorFlash: 'on', turnGlow: 'on' } });
+test('all four doors open: only the four interior door contour lines are released, through the allow-listed write', async () => {
+    const { svc, car, bdc, clock } = await makeService({ strict: true });
     car.condition(5); car.factory(1);
+    await svc.apply(BLUE);
+    await clock.advance(2000);
+    const n = writes(bdc).length;
     car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchPSD: 1, statusDoorSwitchDRDR: 1, statusDoorSwitchPSDR: 1 });
-    car.turn(6);
-    await tick(); await clock.advance(3000);
+    await tick(); await svc.ctl.scheduler.drain();
     const lines = new Set(Object.keys(LINE).map((d) => LINE[d]));
-    const w = writes(bdc);
-    assert.ok(w.length > 8);
+    const w = writes(bdc).slice(n);
+    assert.strictEqual(w.length, 4);
     w.forEach((r) => {
         assert.strictEqual(r.target, 0x40);
         assert.ok((r.data[0] === 0xDA && r.data[1] === 0x5E) || (r.data[0] === 0xE3 && r.data[1] === 0xD1), 'only the interior layering actuator');
         assert.strictEqual(P.checkRequest(0x40, 0x2E, r.data), null);
-        assert.ok(lines.has(keyOf(r)), keyOf(r) + ' is a door contour line');
+        assert.ok(lines.has(keyOf(r)) && isRelease(r), keyOf(r) + ' is a door contour line, released');
     });
+    await clock.advance(20000);
+    assert.ok(writes(bdc).slice(n + 4).every((r) => r.data[2] !== 0 && !lines.has(keyOf(r))), 'both buses have a line with BMW: single writes only, none to a line');
     assert.ok(bdc.requests.every((r) => r.sid === 0x22 || r.sid === 0x2E), 'no routine, no IO control');
 });
-test('door flash stops when the car is left, when its setting is switched off, and by itself after five minutes', async () => {
-    const a = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+test('the handback ends with the car left (everything is BMW\'s then) and can be switched off; a door left open causes no writes', async () => {
+    const a = await makeService({ strict: true });
     a.car.condition(5); a.car.factory(1);
+    await a.svc.apply(BLUE);
     a.car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await a.clock.advance(50);
+    await tick(); await a.svc.ctl.scheduler.drain();
     a.car.condition(2); await settle(a.svc);
     assert.ok(allOem(a.svc));
-    const n = writes(a.bdc).length;
-    await a.clock.advance(10000); await a.svc.gateTick();
-    assert.strictEqual(writes(a.bdc).length, n, 'a door left open does not keep the body controller busy');
-    const b = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+    const n = a.bdc.requests.length;
+    await a.clock.advance(10 * 60000); await a.svc.gateTick();
+    assert.strictEqual(a.bdc.requests.length, n, 'a door left open on a parked car: not one request to the body controller');
+    // the setting: off = the custom colour stays on an open door's line
+    const b = await makeService({ strict: true });
     b.car.condition(5); b.car.factory(1);
+    await b.svc.apply(BLUE);
     b.car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await b.clock.advance(50);
-    b.settings.set('doorFlash', 'off');                        // the driver switches it off while a door is open
     await tick(); await b.svc.ctl.scheduler.drain();
     assert.strictEqual(phys(b.svc, LINE.driverFront)[4], 'oem');
-    b.settings.set('doorFlash', 'on');
-    await tick(); await b.clock.advance(50);
-    assert.deepStrictEqual(phys(b.svc, LINE.driverFront).slice(0, 3), [254, 0, 0], 'and on again');
-    await b.clock.advance(5 * 60000 + 2000); await settle(b.svc);
-    assert.strictEqual(phys(b.svc, LINE.driverFront)[4], 'oem', 'a door open for minutes stops flashing');
+    b.settings.set('doorRelease', 'off');                      // switched off while the door is open
+    await tick(); await b.svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(phys(b.svc, LINE.driverFront), [0, 0, 254, 100, 'custom'], 'the colour is back on it');
+    b.settings.set('doorRelease', 'on');
+    await tick(); await b.svc.ctl.scheduler.drain();
+    assert.strictEqual(phys(b.svc, LINE.driverFront)[4], 'oem', 'and BMW\'s again');
+    // a door open for a long time stays BMW's: nothing is being written to it, so there is nothing to time out
+    await b.clock.advance(20 * 60000); await settle(b.svc);
+    assert.strictEqual(phys(b.svc, LINE.driverFront)[4], 'oem');
+    assert.strictEqual(b.svc.ctl.program.mode, 'solid');
 });
-test('the factory lighting switched off during a door flash releases the door line too', async () => {
-    const { svc, car, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+test('the factory lighting switched off while a door is open: every module back in two whole-bus releases', async () => {
+    const { svc, car, bdc, clock } = await makeService({ strict: true });
     car.condition(5); car.factory(1);
     await svc.apply(BLUE);
     car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await clock.advance(50);
+    await tick(); await svc.ctl.scheduler.drain();
+    const n = writes(bdc).length;
     car.factory(0); await settle(svc);
+    assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['1:0', '2:0']);
+    assert.ok(writes(bdc).slice(n).every(isRelease));
     assert.ok(allOem(svc));
+    const m = writes(bdc).length;
     await clock.advance(5000);
-    assert.ok(allOem(svc), 'and it does not start again');
+    car.doors({});
+    await tick(); await clock.advance(5000);
+    assert.strictEqual(writes(bdc).length, m, 'and nothing starts again, not even when the door closes');
+    assert.ok(allOem(svc));
+});
+test('a door closing while the car is moving gives its line the colour back', async () => {
+    const opts = { strict: true, speed: 0 };
+    const { svc, car } = await makeService(opts);
+    car.condition(5); car.factory(1);
+    await svc.apply(BLUE);
+    car.doors({ statusDoorSwitchPSDR: 1 });
+    await tick(); await svc.ctl.scheduler.drain();
+    opts.speed = 40; car.condition(10);                        // driving
+    assert.strictEqual(svc.ctl.parked(), false);
+    // (canControl({ parked: false }): giving a module back its colour is not a lighting change the parked rule blocks)
+    assert.strictEqual(svc.ctl.canControl({ parked: false }).ok, true);
+    car.doors({});
+    await tick(); await svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(phys(svc, LINE.passengerRear), [0, 0, 254, 100, 'custom']);
 });
 
 /* ================= turn indicators: green ================= */
@@ -655,22 +699,23 @@ test('indicator glow: left-hand drive mirrors it; it is off by default, can be s
     await off.clock.advance(5000);
     assert.strictEqual(writes(off.bdc).length, n);
 });
-test('an open door\'s red wins over the indicator\'s green on the same line; the indicator provider going away stops the glow', async () => {
-    const { svc, car, clock, signals } = await makeService({ strict: true, sets: { turnGlow: 'on', doorFlash: 'on' } });
+test('an open door\'s line is BMW\'s even while the indicator blinks: the other line of that side glows; the indicator provider going away stops the glow', async () => {
+    const { svc, car, clock, signals, bdc } = await makeService({ strict: true, sets: { turnGlow: 'on' } });
     car.condition(5); car.factory(1);
     car.turn(7); car.doors({ statusDoorSwitchPSD: 1 });
     await tick(); await clock.advance(50);
-    assert.deepStrictEqual(phys(svc, LINE.passengerFront).slice(0, 3), [254, 0, 0]);
+    assert.strictEqual(phys(svc, LINE.passengerFront)[4], 'oem', 'the open door\'s line is not ours to blink');
     assert.deepStrictEqual(phys(svc, LINE.passengerRear).slice(0, 3), [0, 230, 60]);
+    await clock.advance(3000);
+    assert.ok(writes(bdc).every((r) => keyOf(r) !== LINE.passengerFront), 'never written');
     car.doors({});
     signals.subs[LIGHT].available = false;                    // no "indicator off" will ever arrive
     await settle(svc);
     assert.strictEqual(phys(svc, LINE.passengerRear)[4], 'oem');
 });
-
 /* ================= night ================= */
-test('night dimming (off by default): half the brightness at night, full by day, colours untouched; a door\'s red stays full', async () => {
-    const { svc, car, settings, clock } = await makeService({ strict: true, sets: { doorFlash: 'on' } });
+test('night dimming (off by default): half the brightness at night, full by day, colours untouched; an open door\'s line stays BMW\'s', async () => {
+    const { svc, car, settings, clock } = await makeService({ strict: true });
     car.condition(5); car.factory(1);
     await svc.apply(BLUE);
     car.night(2);
@@ -681,8 +726,10 @@ test('night dimming (off by default): half the brightness at night, full by day,
     assert.deepStrictEqual(phys(svc, '2:1').slice(0, 4), [0, 0, 254, 50]);
     car.doors({ statusDoorSwitchDRD: 1 });
     await tick(); await clock.advance(50);
-    assert.strictEqual(phys(svc, LINE.driverFront)[3], 100);
+    assert.strictEqual(phys(svc, LINE.driverFront)[4], 'oem');
     car.doors({});
+    await tick(); await svc.ctl.scheduler.drain();
+    assert.deepStrictEqual(phys(svc, LINE.driverFront).slice(0, 4), [0, 0, 254, 50], 'closed: the dimmed colour');
     car.night(1);
     await tick(); await svc.ctl.scheduler.drain();
     assert.strictEqual(phys(svc, '2:1')[3], 100);
@@ -777,8 +824,13 @@ test('with a read-back the missing reply is settled by evidence: a module that s
     const real = c._writeSlave.bind(c);
     let lose = 1;
     c._writeSlave = async (slave, params) => { const r = await real(slave, params); return lose-- > 0 ? { ok: false, reason: 'timeout' } : r; };
+    let check = null;
+    c.on('verified', (v) => { check = v; });
     const r = await c.apply(BLUE);
-    assert.deepStrictEqual([r.ok, r.unanswered, r.confirmed, r.missed], [true, 1, 19, 0]);
+    assert.deepStrictEqual([r.ok, r.unanswered, r.verifying], [true, 1, true], 'an unanswered write arms the read-back (single writes, setting off)');
+    assert.strictEqual(check, null, 'Apply did not wait for it');
+    await clock.advance(1600);
+    assert.deepStrictEqual([check.confirmed, check.missed], [19, 0]);
     assert.strictEqual(writes(bdc).length, 19, 'the read-back showed it took: no second write');
 });
 test('a whole-bus write without a reply: not repeated as 12 single writes, whole-bus mode stays on; a REFUSED one falls back', async () => {
@@ -815,9 +867,13 @@ test('whole-bus mode is preferred for a uniform colour, never used for a bus wit
     const clock = fakeClock(), bdc = new MockBdc({ now: clock.now, deafKeys: ['1:1'] });
     const c = new MockLightingController({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient', txMode: 'broadcast' });
     await c.connect();
+    const checks = [];
+    c.on('verified', (v) => checks.push([v.confirmed, v.missed]));
     const r = await c.apply(BLUE);
-    assert.deepStrictEqual(writes(bdc).slice(0, 2).map(keyOf), ['1:0', '2:0'], 'the colour is on after two writes');
-    assert.deepStrictEqual([r.confirmed, r.missed], [18, 1]);
+    assert.deepStrictEqual(writes(bdc).map(keyOf), ['1:0', '2:0'], 'the colour is on after two writes, and Apply has answered');
+    assert.strictEqual(r.verifying, true);
+    await clock.advance(1600);
+    assert.deepStrictEqual(checks[0], [18, 1]);
     assert.deepStrictEqual(writes(bdc).slice(2).map(keyOf), ['1:1'], 'the read-back found the one that missed it: one single write');
     assert.deepStrictEqual(Array.from(c.deaf), ['1:1']);
     await c.restoreOem();
@@ -850,19 +906,20 @@ test('the real transport path: one request in flight, the kit\'s own busy retrie
 });
 
 /* ================= the screen ================= */
-test('the Driving page: door flash, indicator glow and night dimming each have a switch that turns them on and off again', async () => {
+test('the Driving page: the door handback, indicator glow and night dimming each have a switch that turns them on and off again', async () => {
     const h = await harness({});
     h.app.setPage(5);
     await h.frame();
-    for (const [key, setting] of [['fx:door', 'doorFlash'], ['fx:turn', 'turnGlow'], ['fx:night', 'nightDim']]) {
-        assert.strictEqual(h.settings.get(setting), 'off');
+    for (const [key, setting, first] of [['fx:door', 'doorRelease', 'on'], ['fx:turn', 'turnGlow', 'off'], ['fx:night', 'nightDim', 'off']]) {
+        const other = first === 'on' ? 'off' : 'on';
+        assert.strictEqual(h.settings.get(setting), first);
         await h.press(key); await h.frame();
-        assert.strictEqual(h.settings.get(setting), 'on', setting);
+        assert.strictEqual(h.settings.get(setting), other, setting);
         await h.press(key); await h.frame();
-        assert.strictEqual(h.settings.get(setting), 'off', setting + ' can be switched off again');
+        assert.strictEqual(h.settings.get(setting), first, setting + ' can be switched back');
     }
     const label = (k) => SPEC.settings.find((s) => s.key === k).label;
-    assert.strictEqual(label('doorFlash'), 'Open door red flash');
+    assert.strictEqual(label('doorRelease'), 'Open door');
     await h.app.svc.stop();
 });
 test('every page draws, every mode is reachable, and no two controls of a page overlap', async () => {

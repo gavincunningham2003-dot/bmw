@@ -1,3 +1,6 @@
 * text=auto
 *.png binary
 *.ps1 text eol=crlf
+# The MGU App Kit Ambient Config files kept byte for byte (bmw-g20-idrive-rgb/THIRD_PARTY.md): never CRLF
+bmw-g20-idrive-rgb/app/ambient_rgb/ambient_config_scenes.js text eol=lf
+bmw-g20-idrive-rgb/app/ambient_rgb/ambient_config_lin.js text eol=lf

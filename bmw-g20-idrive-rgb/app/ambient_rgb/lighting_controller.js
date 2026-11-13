@@ -19,13 +19,41 @@
  *                      ZEIT * keepAliveFactor; animated programs: frames carry the refresh, and modules whose target
  *                      has not changed are forced in before they could lapse
  *
+ * THE UPDATE METHOD is the MGU App Kit's Ambient Config's (apps/ambient_config/lights.js, MIT, (c) its authors;
+ * THIRD_PARTY.md), ported onto this controller's scheduler and gates. What is taken from it, by its own names:
+ *
+ *   _plan / _next   a frame is every light at the colour of ONE moment; per LIN bus the colour most lights want goes
+ *                   out as one write to NAD 0 (the whole bus), then single writes for the lights that differ; lights
+ *                   that already show their colour and are not due for renewal are skipped (lighting_plan.js). A
+ *                   whole-cabin colour is 2 writes, not 19.
+ *   frame by frame  the next frame is planned only when the last one is completely written, from the time it is
+ *                   THEN (the ticker below awaits the scheduler). So there is never a queue of frames, and none is
+ *                   ever sent late: a slow link gives fewer frames, each of them current.
+ *   holds           a moving scene's writes hold MOVE_HOLD_S (5 s) and are renewed after MOVE_RENEW_MS (3 s)
+ *   _check          a positive reply does not prove a light took its colour. After a still Apply the buses are read
+ *                   back ONCE, checkMs (1.5 s) after the writes, in the background: Apply has long resolved and the
+ *                   screen is free. A light that missed it is written again (and a second read confirms the repair).
+ *   _giveBack       handing back is one NAD 0 release a bus (lighting_plan.planRelease), then one read-back; a light
+ *                   that still shows our colour is released on its own.
+ *   hold(key, on)   nothing is written while a read-back has the link (scheduler.hold()).
+ *
+ * What is NOT taken, because this project's rules are stricter: lights.js writes a light again when its write got
+ * no reply (here that is never a reason to send again), pauses 10 s after four failures (here control stops and
+ * says so), and holds a still colour for 60 s (here the driver's "Keep-alive" setting, 10 s by default, so the
+ * factory lighting is back within that time whatever happens to the app).
+ *
+ * AN OPEN DOOR (lighting_overlay.js): that door's contour line has no target, so it is released with the factory
+ * handback and then left alone: no single write, no keep-alive, and no NAD 0 write on its bus while the door is
+ * open (the rest of that bus is written singly). When the door closes the module is in the scene again and gets
+ * the colour of that moment.
+ *
  * What the car established (PROTOCOL_FINDINGS.md 0.1): 2E DA5E / E3D1 drive one module for ZEIT seconds (~14 ms a
  * write over ENET), override the OEM lighting, hand back at once on ZUSTAND 0 and by themselves when ZEIT lapses.
  * The head unit's TASU path takes one request at a time (kit/diag.js), so the scheduler sends one write at a time.
  *
- * Effects (lighting_overlay.js): setEffects({ doors, turn, dim }) lays an open door's red blink, a turn indicator's
- * green blink and the night dimming OVER whatever is applied (also over the car's own lighting, when nothing is).
- * The applied program and its time origin are not touched, so it carries on in step when the effect ends; a
+ * Signals (lighting_overlay.js): setEffects({ doors, turn, dim }) hands an open door's contour line back to BMW,
+ * lays a turn indicator's green blink over whatever is applied (also over the car's own lighting, when nothing
+ * is) and dims at night. The applied program and its time origin are not touched, so it carries on in step; a
  * module the program leaves to the car is handed back the moment its effect ends.
  *
  * No reply is never a reason to write again (lighting_scheduler.js): an unanswered write is counted, shown, and
@@ -46,6 +74,8 @@ const PL = require('./lighting_plan');
 const O = require('./lighting_overlay');
 
 const STATES = Object.freeze(['disconnected', 'connecting', 'connected', 'error']);
+// Ambient Config's lights.js: a moving scene's hold and renewal, the read-back's delay, the pause when nothing is due
+const MOVE_HOLD_S = 5, MOVE_RENEW_MS = 3000, CHECK_MS = 1500, IDLE_FRAME_MS = 40, CHECKS = 2;
 
 class LightingController extends EventEmitter {
     constructor(opts) {
@@ -55,7 +85,8 @@ class LightingController extends EventEmitter {
         this.kind = o.kind || 'base';
         this.refreshSeconds = Math.max(2, Math.min(254, o.refreshSeconds || 10));   // ZEIT sent with every write
         this.keepAliveFactor = o.keepAliveFactor || 0.5;                           // refresh a module once its write is this old
-        this.frameMs = o.frameMs || 80;                                           // animation tick target; adapts to the measured round
+        this.frameMs = o.frameMs || IDLE_FRAME_MS;                                // the shortest time between two frames (a floor, not a pace: see _startTicker)
+        this.checkMs = o.checkMs == null ? CHECK_MS : o.checkMs;                  // the background read-back, this long after the last write
         this.maxSlaveFailures = o.maxSlaveFailures || 3;
         this.maxRejects = o.maxRejects || 5;
         this.maxUnanswered = o.maxUnanswered || 3;                                // writes in a row without a reply before control stops
@@ -65,8 +96,8 @@ class LightingController extends EventEmitter {
         this.txMode = o.txMode === 'broadcast' ? 'broadcast' : 'individual';     // 'broadcast': NAD 0 where it saves writes (lighting_plan.js)
         this.broadcastOk = true;                                                 // false once the car refused a NAD 0 write
         this.deaf = new Set();                                                   // modules seen to miss a whole-bus write: written singly after it
-        this.moveSeconds = Math.max(2, Math.min(30, o.moveSeconds || 10));       // ZEIT of a moving program's writes
-        this.verify = !!o.verify;                                                // read both buses back after a still Apply
+        this.moveSeconds = Math.max(2, Math.min(30, o.moveSeconds || MOVE_HOLD_S));   // ZEIT of a moving program's writes
+        this.verify = !!o.verify;                                                // read both buses back after a still Apply (always with whole-bus writes)
         this._setTimeout = o.setTimeout || setTimeout;
         this._clearTimeout = o.clearTimeout || clearTimeout;
         this._now = o.now || Date.now;
@@ -80,6 +111,10 @@ class LightingController extends EventEmitter {
         this.scheduler.on('unanswered', (key, params) => this._onUnanswered(key, params));
         this.effects = { doors: [], doorsSince: 0, turn: [], turnSince: 0, dim: 1 };   // lighting_overlay.js state
         this._viaBus = new Set();          // modules whose last write was a whole-bus one
+        this._sent = new Map();            // key -> the colour last written to it (the read-back after handing back)
+        this._verifyTimer = null;          // the background read-back
+        this._tickRun = 0;                 // which ticker loop is the live one
+        this._shortHold = false;           // frames (short ZEIT) were written since the last full still write
         this._unanswered = 0;              // writes in a row without a reply
         this._closed = false;
 
@@ -93,7 +128,7 @@ class LightingController extends EventEmitter {
         this.driven = new Set();           // modules this controller has driven since the last restore
         this.failures = new Map();         // key -> count of refusals in a row
         this.lastError = null;
-        this.stats = { applies: 0, restores: 0, frames: 0, framesDropped: 0, keepAlives: 0, lastApplyMs: null, lastRestore: null, rejectsInARow: 0, broadcasts: 0, verified: 0, confirmed: 0, missed: 0, unanswered: 0, effectFrames: 0, lapses: 0 };
+        this.stats = { applies: 0, restores: 0, frames: 0, framesWritten: 0, framesDropped: 0, keepAlives: 0, lastApplyMs: null, lastRestore: null, rejectsInARow: 0, broadcasts: 0, busReleases: 0, verified: 0, confirmed: 0, missed: 0, unanswered: 0, effectFrames: 0, lapses: 0, releaseRepairs: 0, doorReleases: 0 };
         this._onceTimer = null;
         this.history = [];
         this._ticker = null;
@@ -154,8 +189,10 @@ class LightingController extends EventEmitter {
     _serial(fn) { const p = this._op.then(fn, fn); this._op = p.catch(() => {}); return p; }
 
     /**
-     * Apply a confirmed program. Resolves { ok, reason?, written, failed, released } once the transport has taken
-     * every write of the first round (or refused it). Static programs then only get keep-alives; animated ones tick.
+     * Apply a confirmed program. Resolves { ok, reason?, written, failed, released, verifying } once the transport has
+     * taken every write of the first round (or refused it): it does NOT wait for a read-back. Static programs then
+     * get keep-alives and, with whole-bus writes or the setting on, one read-back in the background ('verified' is
+     * emitted with its result); animated ones tick.
      */
     apply(program) {
         return this._serial(async () => {
@@ -164,18 +201,19 @@ class LightingController extends EventEmitter {
             const p = S.normalise(program);
             const gen = ++this._gen;
             const t0 = this._now();
-            this._stopTicker(); this._stopOnce();
+            this._stopTicker(); this._stopOnce(); this._stopVerify();
             this.scheduler.clear('frame');
             const wasAnimated = S.isAnimated(this.program);
             this.program = p;
             if (!wasAnimated || !S.isAnimated(p)) this.phase0 = this._now();
             const scene = this._compose(this._now());
-            // modules driven before but not in this program: hand them back
-            const stale = Array.from(this.driven).filter((k) => !scene[k]).map((k) => this.byKey.get(k)).filter(Boolean);
-            if (stale.length) this._release(stale);
+            // modules driven before but not in this program (or whose door is open): hand them back
+            const stale = this._gone(scene);
+            if (stale.length) this._release(stale, scene);
             const keys = Object.keys(scene);
             this._submit(scene, 'apply', { all: true });
             this.scene = scene;
+            this._shortHold = this._moving();
             this.stats.applies++;
             this.emit('program', p);
             await this.scheduler.drain();
@@ -190,26 +228,32 @@ class LightingController extends EventEmitter {
                 this._fail(unanswered ? 'the body controller answered none of the writes (none was sent again)' : 'the BDC accepted none of the writes');
                 return { ok: false, reason: this.lastError, written, failed, unanswered, released: stale.length };
             }
-            let check = null;
+            let verifying = false;
             if (this._moving()) { this._startTicker(); this._armOnce(p, gen); } else {
-                // a read-back settles what a missing reply or a whole-bus write left open
-                if ((this.verify || this._mode() === 'broadcast' || unanswered) && this._canVerify()) { check = await this.verifyApplied(); if (gen !== this._gen) return { ok: false, reason: 'superseded', written: 0, failed: 0 }; }
                 this._armKeepAlive();
+                // a read-back settles what a missing reply or a whole-bus write left open: later, in the background
+                verifying = this._armVerify(!!unanswered);
             }
-            this.log.info('applied ' + S.describe(p, this.slaves) + ': ' + written + ' written, ' + failed + ' failed' + (unanswered ? ', ' + unanswered + ' unanswered (not resent)' : '') + ', ' + this.stats.lastApplyMs + ' ms' + (check ? ', read back: ' + check.confirmed + ' confirmed, ' + check.missed + ' missed' : ''));
-            return Object.assign({ ok: true, written, failed, unanswered, released: stale.length }, check ? { confirmed: check.confirmed, missed: check.missed } : {});
+            this.log.info('applied ' + S.describe(p, this.slaves) + ': ' + written + ' written, ' + failed + ' failed' + (unanswered ? ', ' + unanswered + ' unanswered (not resent)' : '') + ', ' + this.stats.lastApplyMs + ' ms' + (verifying ? ', read-back in ' + this.checkMs + ' ms' : ''));
+            return { ok: true, written, failed, unanswered, released: stale.length, verifying };
         });
     }
 
     /**
      * Back to OEM: stop everything, release every driven module and wait for the transport. Resolves
      * { ok, released, failed: [keys], pending } and never claims success for a module whose release was not accepted.
+     *
+     * The release is Ambient Config's give-back: ONE write to NAD 0 for each LIN bus this controller drove, one
+     * after the other (two writes for the whole cabin), whatever the setting for colour writes says; single
+     * releases only once the car has refused a NAD 0 write. A release nobody answers is not sent again: the transport
+     * gone or the body controller asleep means nothing more is sent and the modules lapse by themselves (ZEIT).
+     * o.verify === false (the car was left, the app is stopping): no read-back afterwards.
      */
     restoreOem(o) {
         return this._serial(async () => {
             this._gen++;
             if (o && o.final) { this._closed = true; this.effects = Object.assign({}, this.effects, { doors: [], turn: [] }); }
-            this._stopTicker(); this._stopOnce();
+            this._stopTicker(); this._stopOnce(); this._stopVerify();
             this._stopKeepAlive();
             this.scheduler.clear();
             const had = !!this.program;
@@ -220,7 +264,7 @@ class LightingController extends EventEmitter {
             const slaves = keys.map((k) => this.byKey.get(k)).filter(Boolean);
             if (slaves.length) {
                 if (!this._available()) { this.stats.restores++; return { ok: false, reason: 'transport unavailable: ' + slaves.length + ' module(s) not released (they lapse by themselves within ' + this.refreshSeconds + ' s)', released: 0, failed: keys, pending: keys.length }; }
-                this._release(slaves);
+                this._release(slaves, null);
                 await this.scheduler.drain();
             }
             const failed = [];
@@ -230,13 +274,15 @@ class LightingController extends EventEmitter {
             const ok = failed.length === 0;
             // an effect still wanted (a door still open) goes on over the car's own lighting
             if (!this._closed && O.moving(this.effects, this.slaves) && this._available() && !(this.gate && this.gate())) this._startTicker();
+            // (lights.js _check after a give-back: a light still showing our colour is released on its own; in the background)
+            if (ok && slaves.length && !this._closed && !(o && (o.final || o.verify === false))) this._armReleaseCheck();
             if (!ok) this.log.warn('restore: ' + failed.length + ' module(s) not released: ' + failed.join(' '));
             else if (had) this.log.info('restored OEM: ' + keys.length + ' module(s) released');
             return { ok, released: keys.length - failed.length, failed, pending: 0, reason: ok ? undefined : failed.length + ' release(s) refused or unanswered (they lapse by themselves within ' + this.refreshSeconds + ' s)' };
         });
     }
     /** The end: no effect, no animation, no keep-alive; every driven module released if the transport still takes it. */
-    async shutdown() { let r = null; try { r = await this.restoreOem({ final: true }); } catch (e) { /* best effort */ } this._stopTicker(); this._stopOnce(); this._stopKeepAlive(); return r; }
+    async shutdown() { let r = null; try { r = await this.restoreOem({ final: true }); } catch (e) { /* best effort */ } this._stopTicker(); this._stopOnce(); this._stopKeepAlive(); this._stopVerify(); return r; }
 
     /**
      * Stop writing and let the lights lapse by themselves (ZEIT): for a car whose state is not known (asleep, a
@@ -245,12 +291,12 @@ class LightingController extends EventEmitter {
     lapse(why) {
         return this._serial(async () => {
             this._gen++;
-            this._stopTicker(); this._stopOnce(); this._stopKeepAlive();
+            this._stopTicker(); this._stopOnce(); this._stopKeepAlive(); this._stopVerify();
             this.scheduler.clear();
             const had = !!this.program || this.driven.size > 0;
             const lapsing = this.driven.size, within = this.holdSeconds();
             this.program = null; this.scene = {};
-            this.driven.clear(); this._viaBus.clear();
+            this.driven.clear(); this._viaBus.clear(); this._sent.clear();
             this.scheduler.last.clear();                                // what the modules show is no longer known
             this.stats.lapses++;
             this.emit('program', null);
@@ -261,12 +307,13 @@ class LightingController extends EventEmitter {
 
     /* ---------- effects over the lighting ---------- */
     /**
-     * The effects wanted now: { doors: [door...], turn: [side...], dim: 0..1 } (any subset; lighting_overlay.js).
-     * Starts and stops their blinking; resolves once the change is queued (not once it is written).
+     * What the car's signals ask for now: { doors: [door...], turn: [side...], dim: 0..1 } (any subset;
+     * lighting_overlay.js). doors: the open doors, whose contour lines are handed back to BMW and left alone until
+     * they close. turn: the indicator glow. Resolves once the change is queued (not once it is written).
      */
     setEffects(e) {
         const next = Object.assign({}, this.effects), now = this._now();
-        if (e && e.doors) { const d = e.doors.slice().sort(); if (d.length && !next.doors.length) next.doorsSince = now; next.doors = d; }
+        if (e && e.doors) { const d = e.doors.slice().sort(); if (d.length && !next.doors.length) next.doorsSince = now; if (d.some((x) => next.doors.indexOf(x) < 0)) this.stats.doorReleases++; next.doors = d; }
         if (e && e.turn) { const t = e.turn.slice().sort(); if (t.length && !next.turn.length) next.turnSince = now; next.turn = t; }
         if (e && e.dim != null) next.dim = Math.max(0, Math.min(1, Number(e.dim)));
         const changed = next.doors.join() !== this.effects.doors.join() || next.turn.join() !== this.effects.turn.join() || next.dim !== this.effects.dim;
@@ -281,13 +328,16 @@ class LightingController extends EventEmitter {
         const can = this.canControl({ parked: false });
         if (!can.ok) { if (want) this.log.info('effect not shown: ' + can.reason); return Object.assign({ changed: true }, can); }
         if (this._moving()) { this._startTicker(); return { ok: true, changed: true }; }
-        // still again: what is applied (or nothing) written once, in full (the frames carried the short ZEIT)
+        // still: a door's module handed back (its own release, nothing else on its bus touched), a closed door's
+        // module given its colour again, the night's brightness. Only what changed is written; after frames (which
+        // carried the short ZEIT) everything once, in full.
         this._stopTicker();
         this.scheduler.clear('frame');
         const scene = this._compose(this._now());
-        const stale = Array.from(this.driven).filter((k) => !scene[k]).map((k) => this.byKey.get(k)).filter(Boolean);
-        if (stale.length) this._release(stale);
-        this._submit(scene, 'apply', { all: true });
+        const stale = this._gone(scene);
+        if (stale.length) this._release(stale, scene);
+        this._submit(scene, 'apply', { all: this._shortHold });
+        this._shortHold = false;
         this.scene = scene;
         if (this.program) this._armKeepAlive();
         return { ok: true, changed: true };
@@ -297,35 +347,49 @@ class LightingController extends EventEmitter {
         const base = this.program ? S.render(this.program, this.slaves, now, { phase0: this.phase0 }) : {};
         return O.compose(base, this.slaves, this.effects, now);
     }
+    /**
+     * The modules to hand back: driven by this controller and without a target in the scene (the program leaves
+     * them to the car, or their door is open). One whose release went out and got no reply is not asked again.
+     */
+    _gone(scene) {
+        return Array.from(this.driven).filter((k) => !scene[k]).filter((k) => { const l = this.scheduler.last.get(k); return !(l && l.unanswered && l.params && l.params.active === false); }).map((k) => this.byKey.get(k)).filter(Boolean);
+    }
     /** Is there anything that changes with time (so frames are needed)? */
     _moving() { return S.isAnimated(this.program) || O.moving(this.effects, this.slaves); }
 
     /* ---------- the loops ---------- */
-    /** ZEIT of the writes now: a still program holds refreshSeconds, a moving one moveSeconds at most. */
+    /** ZEIT of the writes now: a still program holds refreshSeconds, a moving one moveSeconds (5 s) at most. */
     holdSeconds() { return this._moving() ? Math.min(this.refreshSeconds, this.moveSeconds) : this.refreshSeconds; }
+    /** A module is written again once its last write is this old: a moving scene after 3 s of its 5 (lights.js), a still one at keepAliveFactor of its hold. */
+    renewMs() { const hold = this.holdSeconds() * 1000; return this._moving() ? Math.min(MOVE_RENEW_MS, Math.round(hold * 0.6)) : hold * this.keepAliveFactor; }
     _params(t) { return { active: true, r: t.r, g: t.g, b: t.b, brightness: t.brightness, seconds: this.holdSeconds() }; }
     _mode() { return this.txMode === 'broadcast' && this.broadcastOk ? 'broadcast' : 'individual'; }
     /** The module keys a scheduler key reaches: its own, or every module of the bus for NAD 0. */
     _covers(key) { const m = /^(\d+):0$/.exec(key); return m ? this.slaves.filter((s) => s.bus === +m[1]).map(S.key) : [key]; }
     /** Queue the writes that put a scene on (lighting_plan.js decides between single and whole-bus writes). */
     _submit(scene, prio, o) {
-        const items = PL.plan(scene, this.slaves, this.scheduler.last, { mode: this._mode(), params: (t) => this._params(t), force: new Set((o && o.force) || []), all: !!(o && o.all), deaf: this.deaf });
+        const items = PL.plan(scene, this.slaves, this.scheduler.last, { mode: this._mode(), params: (t) => this._params(t), force: new Set((o && o.force) || []), all: !!(o && o.all), deaf: this.deaf, order: (m) => S.lightOf(m).y });
         if (prio === 'frame') return Object.assign(this.scheduler.frame(items.map((it) => ({ key: it.key, slave: it.slave, params: it.params })), items.filter((it) => it.force).map((it) => it.key)), { planned: items.length });
         items.forEach((it) => this.scheduler.set(it.key, it.slave, it.params, prio, true));
         return { planned: items.length };
     }
-    _release(slaves) {
-        PL.planRelease(slaves, this.slaves, { mode: this._mode() }).forEach((it) => this.scheduler.set(it.key, it.slave, it.params, 'release', true));
+    /**
+     * Hand modules back. scene: what stays lit (its modules must not be touched, so their bus is never released
+     * whole); null: nothing stays, every bus goes back with one NAD 0 write (lighting_plan.planRelease).
+     */
+    _release(slaves, scene) {
+        PL.planRelease(slaves, this.slaves, { whole: this.broadcastOk, keep: new Set(Object.keys(scene || {})), deaf: this.deaf }).forEach((it) => this.scheduler.set(it.key, it.slave, it.params, 'release', true));
     }
     _onWritten(key, params) {
+        const colour = { r: params.r, g: params.g, b: params.b };
         if (PL.isBusKey(key)) {
-            this.stats.broadcasts++;
+            if (params.active) this.stats.broadcasts++; else this.stats.busReleases++;
             // the whole bus now shows this: what was last written to each of its modules is this write
-            this._covers(key).forEach((k) => { this.scheduler.last.set(k, { params, at: this._now(), ok: true }); if (params.active) { this.driven.add(k); this._viaBus.add(k); } else { this.driven.delete(k); this._viaBus.delete(k); } this.failures.delete(k); });
+            this._covers(key).forEach((k) => { this.scheduler.last.set(k, { params, at: this._now(), ok: true }); if (params.active) { this.driven.add(k); this._viaBus.add(k); this._sent.set(k, colour); } else { this.driven.delete(k); this._viaBus.delete(k); } this.failures.delete(k); });
             this._unanswered = 0;
             return;
         }
-        if (params.active) this.driven.add(key); else this.driven.delete(key);
+        if (params.active) { this.driven.add(key); this._sent.set(key, colour); } else this.driven.delete(key);
         this._viaBus.delete(key); this.failures.delete(key);
         this._unanswered = 0;
     }
@@ -354,15 +418,75 @@ class LightingController extends EventEmitter {
     }
     _canVerify() { return true; }
     /**
+     * Both buses read, with the writes held meanwhile (the gateway takes one request at a time; a status read
+     * answers "pending" and takes seconds on the car). null when neither bus answered.
+     */
+    async _readBack() {
+        this.scheduler.hold();
+        try { await this.scheduler.idle(); return await this._readSlaves(); } catch (e) { this.log.warn('read-back: ' + e); return null; } finally { this.scheduler.unhold(); }
+    }
+    _stopVerify() { if (this._verifyTimer) { this._clearTimeout(this._verifyTimer); this._verifyTimer = null; } }
+    /**
+     * The read-back after a still Apply, in the background (lights.js: "after a still colour the buses are read back
+     * once and a light that missed it is written again"). Armed when whole-bus writes are on, the setting asks for
+     * it, or a write went unanswered (force); checkMs after the writes; a second read only to confirm a repair.
+     * Nothing waits for it: a new Apply, a restore or an animation simply cancels it. Returns whether it is armed.
+     */
+    _armVerify(force, left) {
+        this._stopVerify();
+        if (!(this.verify || this._mode() === 'broadcast' || force) || !this._canVerify()) return false;
+        const gen = this._gen, n = left == null ? CHECKS : left;
+        this._verifyTimer = this._setTimeout(() => {
+            this._verifyTimer = null;
+            if (gen !== this._gen || this._closed || !this.program || this._moving() || !this._available()) return;
+            if (this.gate && this.gate()) return;                        // the car left, the factory lighting off: not one more request
+            this.verifyApplied().then((r) => {
+                if (gen !== this._gen || r.superseded) return;
+                this.emit('verified', r);
+                if (r.missed && n > 1) this._armVerify(true, n - 1);
+            }).catch((e) => this.log.warn('read-back: ' + e));
+        }, this.checkMs);
+        return true;
+    }
+    /**
+     * The read-back after handing back (lights.js _check with _checkOff): a module that still shows the colour last
+     * written to it missed its release (as a module can miss a whole-bus write) and is released on its own, once.
+     */
+    _armReleaseCheck() {
+        this._stopVerify();
+        const sent = new Map(this._sent);
+        this._sent.clear();
+        if (!sent.size || !this._canVerify()) return false;
+        const gen = this._gen;
+        this._verifyTimer = this._setTimeout(() => {
+            this._verifyTimer = null;
+            if (gen !== this._gen || this._closed || this.program || !this._available()) return;
+            this._readBack().then((read) => {
+                this.stats.verified++;
+                if (!read || gen !== this._gen || this.program || this._closed) return;
+                const near = (a, b) => Math.abs(Math.min(254, a) - b) < 3;
+                const ours = read.filter((m) => { const c = sent.get(S.key(m)); return !!c && m.r != null && near(c.r, m.r) && near(c.g, m.g) && near(c.b, m.b); }).map((m) => this.byKey.get(S.key(m))).filter(Boolean);
+                if (ours.length) {
+                    this.stats.releaseRepairs += ours.length;
+                    this.log.info('read-back: ' + ours.map(S.key).join(' ') + ' still showed our colour: released singly');
+                    this.scheduler.release(ours);
+                }
+                this.emit('released', { stillOurs: ours.length });
+            }).catch((e) => this.log.warn('read-back: ' + e));
+        }, this.checkMs);
+        return true;
+    }
+    /**
      * Read both buses back and compare with the applied still scene: a positive reply to a write does not prove the
      * module took it (Ambient Config's finding). A module that shows something else is written once more.
-     * Resolves { confirmed, missed, unread }.
+     * Resolves { confirmed, missed, unread } ({ superseded: true } when the lighting changed during the read).
      */
     async verifyApplied() {
-        const scene = this.scene, keys = Object.keys(scene);
-        let read = null;
-        try { read = await this._readSlaves(); } catch (e) { this.log.warn('read-back: ' + e); }
+        const gen = this._gen;
+        const read = await this._readBack();
         this.stats.verified++;
+        if (gen !== this._gen) return { confirmed: 0, missed: 0, unread: 0, superseded: true };
+        const scene = this.scene, keys = Object.keys(scene);
         if (!read) return { confirmed: 0, missed: 0, unread: keys.length };
         const got = new Map(read.map((s) => [S.key(s), s]));
         const close = (a, b, d) => Math.abs(a - b) <= d;
@@ -385,7 +509,7 @@ class LightingController extends EventEmitter {
     }
     _same(a, b) { return !!a && !!b && a.active === b.active && a.r === b.r && a.g === b.g && a.b === b.b && a.brightness === b.brightness; }
     _staleKeys() {
-        const limit = this._now() - this.holdSeconds() * 1000 * this.keepAliveFactor;
+        const limit = this._now() - this.renewMs();
         return Object.keys(this.scene).filter((k) => { const l = this.scheduler.last.get(k); return !l || !(l.ok || l.unanswered) || l.at <= limit; });
     }
     _stopKeepAlive() { if (this._keepTimer) { this._clearTimeout(this._keepTimer); this._keepTimer = null; } }
@@ -407,43 +531,52 @@ class LightingController extends EventEmitter {
             this._armKeepAlive();
         }, period);
     }
-    _stopTicker() { if (this._ticker) { this._clearTimeout(this._ticker); this._ticker = null; } }
+    _stopTicker() { this._tickRun++; if (this._ticker) { this._clearTimeout(this._ticker); this._ticker = null; } }
     _stopOnce() { if (this._onceTimer) { this._clearTimeout(this._onceTimer); this._onceTimer = null; } }
+    /**
+     * The frames of a moving scene, as Ambient Config's lights.js runs them (_run / _next): one frame = every light at
+     * the colour of the same moment; the frame is written out completely (awaited); only then is the next one made,
+     * from the time it is THEN. Nothing is queued ahead and nothing is paced by a clock, so a frame can never be
+     * obsolete when it is sent and the animation is exactly as fast as the link: 2 writes a frame for Rainbow, Fade
+     * and Wave with whole-bus writes. frameMs is only a floor (and the wait when a frame had nothing to write).
+     */
     _startTicker() {
         this._stopTicker();
         this._stopKeepAlive();                                           // (frames carry the refresh while anything moves)
-        const gen = this._gen;
-        const tick = () => {
+        this._stopVerify();
+        this._shortHold = true;
+        const gen = this._gen, run = this._tickRun;
+        const live = () => gen === this._gen && run === this._tickRun && !this._closed;
+        const tick = async () => {
             this._ticker = null;
-            if (gen !== this._gen || this._closed || !this._moving()) return;
+            if (!live() || !this._moving()) return;
             if (!this._available()) { this._lost('transport lost'); return; }
             // the gate closed (the car left, the factory lighting off, a signal gone): not one more frame
             const why = this.gate && this.gate();
             if (why) { this.emit('gated', why); return; }
-            const scene = this._compose(this._now());
-            const targets = Object.keys(scene);
+            const t0 = this._now();
+            const scene = this._compose(t0);
             const stale = this._staleKeys();
-            // a module whose effect ended and which the program leaves to the car: handed back
-            const gone = Array.from(this.driven).filter((k) => !scene[k]).map((k) => this.byKey.get(k)).filter(Boolean);
-            if (gone.length) this._release(gone);
+            // a module the scene no longer has (its door opened, its effect ended over the car's own lighting): handed
+            // back with its own release, the rest of its bus untouched
+            const gone = this._gone(scene);
+            if (gone.length) this._release(gone, scene);
             this.scene = scene;
             const r = this._submit(scene, 'frame', { force: stale });
             this.stats.frames++;
             if (!S.isAnimated(this.program)) this.stats.effectFrames++;
             this.stats.framesDropped += r.dropped ? 1 : 0;
-            const now = this._now();
-            this._fpsWindow.push(now); while (this._fpsWindow.length && this._fpsWindow[0] < now - 3000) this._fpsWindow.shift();
-            // pace to what the transport can take: a frame per (modules x latency), never faster than frameMs
-            const lat = this.scheduler.stats.avgLatencyMs || 14;
-            // a frame costs as many writes as were planned for it: every module for a moving colour, one or two for a
-            // blinking door line over a still one (so an effect blinks on time), one a bus for whole-bus writes
-            const per = Math.max(this._mode() === 'broadcast' ? 2 : 1, Math.min(targets.length, r.planned || 0));
-            const period = Math.max(this.frameMs, Math.round(lat * per * 1.1));
-            this._ticker = this._setTimeout(tick, period);
+            const wrote = (r.planned || 0) + gone.length > 0;
+            if (wrote) { this.stats.framesWritten++; this._fpsWindow.push(t0); while (this._fpsWindow.length && this._fpsWindow[0] < t0 - 3000) this._fpsWindow.shift(); }
+            // the whole frame out before the next is made: no frame is ever queued behind another
+            await this.scheduler.drain();
+            if (!live()) return;
+            const spent = this._now() - t0;
+            this._ticker = this._setTimeout(() => { tick().catch((e) => this.log.warn('frame: ' + e)); }, wrote ? Math.max(0, this.frameMs - spent) : Math.max(IDLE_FRAME_MS, this.frameMs));
         };
-        tick();
+        tick().catch((e) => this.log.warn('frame: ' + e));
     }
-    /** Frames per second the animation is achieving (last 3 s). */
+    /** Whole frames per second the animation is achieving (last 3 s): frames that wrote something. */
     fps() { return Math.round(this._fpsWindow.length / 3 * 10) / 10; }
 
     _onFailed(key, params, r) {
@@ -467,7 +600,7 @@ class LightingController extends EventEmitter {
         if (allFailing) this._fail('the BDC refuses every module');
     }
     _fail(why) {
-        this._gen++; this._stopTicker(); this._stopOnce(); this._stopKeepAlive(); this.scheduler.clear();
+        this._gen++; this._stopTicker(); this._stopOnce(); this._stopKeepAlive(); this._stopVerify(); this.scheduler.clear();
         this.program = null; this.scene = {};
         this._unanswered = 0;
         this.effects = Object.assign({}, this.effects, { doors: [], turn: [] });   // (the effects stop with it; the next signal starts them again)
@@ -486,7 +619,7 @@ class LightingController extends EventEmitter {
     status() {
         return {
             kind: this.kind, state: this.state, custom: this.custom, program: this.program, description: this.program ? S.describe(this.program, this.slaves) : 'OEM',
-            animated: S.isAnimated(this.program), moving: this._moving(), effects: Object.assign({}, this.effects), fps: this.fps(), refreshSeconds: this.refreshSeconds, holdSeconds: this.holdSeconds(), frameMs: this.frameMs, parkedPolicy: this.parkedPolicy,
+            animated: S.isAnimated(this.program), moving: this._moving(), effects: Object.assign({}, this.effects), released: O.releasedKeys(this.effects, this.slaves), fps: this.fps(), refreshSeconds: this.refreshSeconds, holdSeconds: this.holdSeconds(), renewMs: this.renewMs(), frameMs: this.frameMs, checkMs: this.checkMs, verifying: !!this._verifyTimer, parkedPolicy: this.parkedPolicy,
             txMode: this.txMode, broadcastOk: this.broadcastOk, deaf: Array.from(this.deaf), verify: this.verify, gate: this.gate ? this.gate() : null,
             slaves: this.slaves.map((s) => Object.assign({}, s, { driven: this.driven.has(S.key(s)), failures: this.failures.get(S.key(s)) || 0 })),
             driven: this.driven.size, scene: Object.assign({}, this.scene), capabilities: this.capabilities,
@@ -501,4 +634,4 @@ class LightingController extends EventEmitter {
     _available() { return false; }
 }
 
-module.exports = { LightingController, STATES };
+module.exports = { LightingController, STATES, MOVE_HOLD_S, MOVE_RENEW_MS, CHECK_MS, IDLE_FRAME_MS };

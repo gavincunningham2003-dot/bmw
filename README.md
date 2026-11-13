@@ -23,7 +23,7 @@ Rendered by the head unit's own draw engine, as it looks on the car.
 | ![Colours: the hue ring, the dial and the cabin](bmw-g20-idrive-rgb/docs/screens/04-colours-applied.png) | ![Dual Colour: upper and lower lighting](bmw-g20-idrive-rgb/docs/screens/06-dual-applied.png) |
 | Colours: pick a hue on the ring, see the cabin lit before Apply | Dual Colour: upper and lower lighting with their own colour and brightness |
 | ![Modes: Colour Wave](bmw-g20-idrive-rgb/docs/screens/07-modes-wave.png) | ![Modes: Breathing](bmw-g20-idrive-rgb/docs/screens/08-modes-breathing.png) |
-| Modes: Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave | Each mode with its own settings; presets saved with one press |
+| Modes: Solid, Dual, and the MGU App Kit Ambient Config's Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse | The animations with their two colours and the speed step; presets saved with one press |
 | ![Favourites](bmw-g20-idrive-rgb/docs/screens/09-favourites.png) | ![Diagnostics](bmw-g20-idrive-rgb/docs/screens/10-diagnostics.png) |
 | Favourites: saved colours and complete configurations | Diagnostics: the link, the body controller, all 19 modules, the write statistics |
 
@@ -34,15 +34,22 @@ Rendered by the head unit's own draw engine, as it looks on the car.
 - **Colours, Dual, Modes, Favourites, Diagnostics** pages; zones (dashboard, front doors, rear doors,
   footwells, upper, lower) that keep each other's colours; the BDC's own library colours.
 - **Rotary first.** Every control works with the knob; touch where the head unit routes it.
-- **Safe by design.** Simulated link and disarmed by default; one diagnostic write at a time, paced to
-  the car; lighting changes blocked unless the car is known to be parked; Restore OEM releases every
-  module and reports exactly what was accepted; optional "apply the last lighting at start".
+- **Ambient Config's animations and update method** (0.5.1): the animations are computed by that app's own
+  `scenes.js`, in the app unchanged (MIT); a whole LIN bus is written with one command, so a colour is two
+  writes instead of 19 and Rainbow, Fade and Wave are two writes a frame, each frame made only when the last
+  one is out.
+- **The factory lighting has priority.** An open door's contour line goes back to BMW's own warning light
+  and is left alone until the door closes; locking the car, switching the factory ambient lighting off or
+  Restore OEM hands all 19 modules back in two commands.
+- **Safe by design.** Simulated link and disarmed by default; one diagnostic write at a time; lighting
+  changes blocked unless the car is known to be parked; Restore OEM reports exactly what was accepted;
+  optional "apply the last lighting at start".
 
 ## Run it on the laptop
 
 ```
 cd bmw-g20-idrive-rgb
-npm test            # 166 Node tests
+npm test            # 194 Node tests
 npm run test:py     # 37 Python tests
 npm run emu         # the head unit emulator at http://localhost:8077: mouse = touch, mouse wheel = knob
 ```

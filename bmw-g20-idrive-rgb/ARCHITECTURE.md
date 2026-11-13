@@ -56,8 +56,9 @@ is browsed. Leaving a page, Cancel, or the hardware BACK drops the draft; the ap
 A program is what the user confirms (`lighting_scene.js`): `solid` (colour, brightness, zone), `dual`
 (upper and lower colour and brightness, with the door-handle lights assigned by the setting *Door handle
 lights belong to*), `zones` (a list of zone assignments, later ones win, so changing one zone keeps the
-others), `rainbow`, `fade` (a palette with transition and hold times), `breathing` (brightness between two
-limits), `wave` (a hue travelling from the dashboard to the rear, ordered by each module's real location).
+others), and the animations `rainbow`, `fade`, `breathing`, `wave`, `welcome`, `pulse`. From 0.5.1 the
+animations are not computed here: they are the MGU App Kit Ambient Config's, whose `scenes.js` is in the app
+unchanged, and `render()` only translates (section 3c).
 `render(program, modules, now)` is pure: static programs render the same scene at any time; animated ones
 render a frame. Groups come from the module locations: dashboard and door contour lines are upper; map
 pockets and footwells are lower; handles go where the program says. Zones: all, dashboard, front doors,
@@ -83,8 +84,10 @@ targets, dropping obsolete frames, and retrying `busy` with backoff. `maxInFligh
 for experiments only: the simulation shows a full-cabin frame at 266 ms sequential (3.8 frames/s at the
 measured 14 ms per write) against 168 ms if the transport allowed two in flight, which it is not expected to.
 
-**NAD 0** is NOT assumed to be a broadcast. The LIN broadcast address is `0x7F`; the BDC's `NAD 0..31`
-argument range says nothing about group control. It stays an untested, optional experiment (NEXT_STEPS.md).
+**NAD 0** reaches every module of a LIN bus: reported by the MGU App Kit's Ambient Config, then seen on this
+car over ENET on 2026-11-12 (PROTOCOL_FINDINGS.md section 9: 12 of 12 on bus 2; 6 of 7, then 7 of 7 on bus 1).
+From 0.5.1 it is the default way to write and the way to hand back (section 3c); a module seen to miss a
+whole-bus write gets its own write after each.
 
 ### Restore OEM
 
@@ -155,7 +158,8 @@ changes while driving* can relax this. The simulated link is exempt.
   the full rules.
 - **Effects** never change the applied program or its time origin: the controller renders the program as
   before and lays the effect over the modules it concerns, so an animation carries on in step. A module the
-  program leaves to the car is released the moment its effect ends.
+  program leaves to the car is released the moment its effect ends. (0.5.1: an open door is no longer an
+  effect of the app's: its line is handed back to BMW, section 3c.)
 - **No reply is not a reason to write again**: `lighting_scheduler.js` records such a write as unanswered and
   the controller treats it as possibly taken (driven, keep-alive from now); a read-back decides where one is
   possible; three in a row stop control.
@@ -164,6 +168,40 @@ changes while driving* can relax this. The simulated link is exempt.
   `app.json` becomes `"mguAppStartType": "autostart"` in the package, which MGU Store's deploy tool turns
   into the platform's start type. `autostart` alone does nothing without both of those: the kit's older
   installer lists every app as `manually`. UNVERIFIED.md items 5 to 7.
+
+## 3c. 0.5.1: Ambient Config's animations and update method
+
+```
+ lighting_scene.render(program, modules, now)
+     solid / dual / zones                     this project's own
+     rainbow / fade / breathing / wave        scene = { kind, upper: { rgb, bright }, lower: { rgb, bright }, speed }
+     welcome / pulse                          light = { part, y, bus }   per module
+                                              ambient_config_scenes.js  lightAt(scene, light, t)   <- UNCHANGED file
+                                              ambient_config_lin.js     place(location).y          <- UNCHANGED file
+ lighting_overlay.compose(scene, modules, { doors, turn, dim }, now)
+     an open door's contour line: removed from the scene (BMW's until the door closes)
+ lighting_plan.plan(scene, modules, last)     per bus: NAD 0 for the colour most lights want, then the exceptions
+ lighting_plan.planRelease(...)               per bus: one NAD 0 release, unless a module of it keeps a colour
+ lighting_scheduler                           one request at a time; hold() while a read-back has the link
+```
+
+- **The translation.** `top` / `bottom` are that file's `upper` / `lower`; `light.part` is this project's
+  group (handles by the setting); `light.y` comes from its own table by installation location; `light.bus`
+  is this project's bus minus one. Nothing else is computed: what `lightAt()` returns is the target. The
+  locations are the car's "driver" and "passenger", so right-hand drive needs no mirroring.
+- **Frames** (`lighting_controller._startTicker`, after `lights.js` `_run` / `_next`): a frame is every light
+  at one moment; it is planned, written out completely (awaited), and only then is the next one made from
+  the time it is then. Nothing is queued ahead, so nothing can be sent late. Rainbow, Fade and Wave cost two
+  writes a frame.
+- **Read-back** (`_armVerify`, after `lights.js` `_check`): Apply resolves when the writes are out; one read
+  of both buses follows 1.5 s later in the background and repairs a module that missed its colour.
+- **A door** (`lighting_overlay.js`): its line has no target while it is open, so it is released once and
+  then written by nothing: not singly, not by a keep-alive, and not by NAD 0, which `plan()` never uses on a
+  bus with a module that has no target. Closing puts it back in the scene at the animation's current phase.
+- **Handing back** (`restoreOem`): one NAD 0 release a bus, sequentially, for Restore OEM, the car left, the
+  factory lighting off and the app's stop; single releases only for part of a bus.
+
+What was copied, adapted and left: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## 4. The control paths, as ranked by the brief
 

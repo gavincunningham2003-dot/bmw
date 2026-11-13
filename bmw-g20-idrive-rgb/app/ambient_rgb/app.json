@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep and Sport Pulse, lighting by driving mode, saved configurations, an open door's line flashing red, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: custom lighting is released when the car is left or the factory ambient lighting is switched off.",
-  "version": "0.5.0",
+  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) written a whole LIN bus at a time, lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
+  "version": "0.5.1",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -45,7 +45,7 @@
       "VehicleCondition": "s"
     },
     "de.bmw.body.DoorsWindowsRoofMirrors": {
-      "_optional": "no red flash for an open door",
+      "_optional": "an open door's contour line is not handed back to BMW's own warning light",
       "CentralLockingSystemAndPanelStatus": "s"
     },
     "de.bmw.body.Light": {
@@ -170,31 +170,31 @@
       "key": "txMode",
       "label": "Writes to the car",
       "type": "choice",
-      "default": "individual",
+      "default": "broadcast",
       "options": [
         [
-          "individual",
-          "One per module (verified)"
+          "broadcast",
+          "Whole bus where it saves writes (NAD 0, read back afterwards)"
         ],
         [
-          "broadcast",
-          "Whole bus where it saves writes (NAD 0, read back)"
+          "individual",
+          "One per module (handing back still uses the whole bus)"
         ]
       ]
     },
     {
       "key": "verify",
-      "label": "Read back after Apply",
+      "label": "Read back after Apply (single writes)",
       "type": "choice",
       "default": "off",
       "options": [
         [
           "off",
-          "Off"
+          "Off (whole-bus writes are always read back, in the background)"
         ],
         [
           "on",
-          "On: check every module took its colour"
+          "On: check every module took its colour, in the background"
         ]
       ]
     },
@@ -279,18 +279,18 @@
       ]
     },
     {
-      "key": "doorFlash",
-      "label": "Open door red flash",
+      "key": "doorRelease",
+      "label": "Open door",
       "type": "choice",
-      "default": "off",
+      "default": "on",
       "options": [
         [
-          "off",
-          "Off"
+          "on",
+          "That door's contour line goes back to BMW (its own red warning light)"
         ],
         [
-          "on",
-          "On: an open door's contour line flashes red"
+          "off",
+          "Keep the custom colour on it"
         ]
       ]
     },
@@ -396,11 +396,12 @@
     },
     {
       "key": "frame",
-      "label": "Animation frame time",
+      "label": "Shortest time between animation frames",
       "type": "number",
       "unit": "ms",
-      "default": 80,
+      "default": 40,
       "steps": [
+        40,
         50,
         80,
         120,

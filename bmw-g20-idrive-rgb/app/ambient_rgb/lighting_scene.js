@@ -8,14 +8,38 @@
  *   program = { mode, ... }                                 (what the user applies; render(program, modules, now) -> scene)
  *
  * Modes: solid (one colour, a zone), dual (top / bottom groups with their own colour and brightness), zones (a list of
- * zone assignments, later ones win), rainbow, fade (a palette with transitions), breathing, wave (a hue travelling
- * along the cabin). Static programs render the same scene whatever `now` is; animated ones depend on it.
+ * zone assignments, later ones win) are this project's own and render the same scene whatever `now` is.
+ *
+ * THE ANIMATIONS ARE NOT WRITTEN HERE. Rainbow, Breathing, Smooth Fade, Colour Wave, Welcome Sweep and Sport Pulse
+ * are computed by the MGU App Kit's Ambient Config, whose scenes.js is in this folder unchanged as
+ * ambient_config_scenes.js (MIT; ambient_config_notice.js, THIRD_PARTY.md). render() only translates: a program
+ * becomes that file's scene ({ kind, upper: { rgb, bright }, lower: { rgb, bright }, speed }), a module becomes its
+ * light ({ part, y, bus }) and every colour and brightness on the car is what its lightAt(scene, light, t) returns
+ * for that moment. Nothing is recomputed, rounded again or approximated here; tests/node/test_v051.js compares
+ * render() with lightAt() module by module at many moments and at the three speeds.
+ *
+ *   program (a moving mode)  { mode: 'rainbow' | 'fade' | 'breathing' | 'wave', top: { colour, brightness },
+ *                              bottom: { colour, brightness }, speed: 1 slow | 2 normal | 3 fast, handlesTo, zone }
+ *     top / bottom are Ambient Config's upper / lower: breathing breathes each group in its own colour, the fade
+ *     glides from the upper colour to the lower one and back on every light, the wave rolls around the upper
+ *     colour's hue, the rainbow takes the upper brightness. The periods are that file's (breathing 4 s, wave 5 s,
+ *     fade 8 s, rainbow 12 s at normal speed; x 1.6 slow, x 0.55 fast).
+ *   light.part   'upper' for this project's top group, 'lower' for the bottom one (the door handles as the setting
+ *                says; Ambient Config has them lower, which is the default here)
+ *   light.y      where the module sits from the dash (0) to the boot (1): Ambient Config's own table
+ *                (ambient_config_lin.js place(), by the body controller's installation location)
+ *   light.bus    Ambient Config numbers the LIN buses 0 and 1, this project 1 and 2: bus - 1. The wave rolls bus
+ *                by bus, so on this G20 from the passenger's doors (bus 1) to the dash and the driver's doors
+ *                (bus 2). The locations are the car's own words (driver / passenger, not left / right), so a
+ *                right-hand-drive car needs no mirroring: the driver's doors are the driver's doors.
  *
  * Groups come from the module locations (lighting_protocol LOCATION ids): the dashboard contour lines and the door
  * contour lines are "upper", the map pockets and footwells are "lower"; the door-opener (handle) lights are assigned
  * by the program (handlesTo: 'top' | 'bottom' | 'off'), never assumed.
  */
 const P = require('./lighting_protocol');
+const AC = require('./ambient_config_scenes');          // Ambient Config's scenes.js, unchanged
+const LIN = require('./ambient_config_lin');            // Ambient Config's lin.js, unchanged (place(): where a light sits)
 
 const key = (m) => m.bus + ':' + m.nad;
 const clampByte = (n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0)));
@@ -103,45 +127,38 @@ function zoneLabel(name, modules) {
     return ZONE_LABELS[name] || name;
 }
 
-/**
- * Wave order: where each module sits along the cabin, 0 (front) .. 1 (rear), so a wave travels front to back; the
- * side gives a small offset so the two sides are not exactly in step. Dashboard first, then front doors / footwells,
- * then the rear.
- */
-function wavePosition(m) {
-    const c = category(m);
-    let x = c === 'dashLine' || c === 'dashTrim' ? 0.0 : isFront(m) ? 0.35 : isRear(m) ? 0.75 : 0.5;
-    if (c === 'footwell') x += 0.1;
-    if (c === 'pocket') x += 0.05;
-    if (m.locationId === 0x15) x -= 0.03;                       // dashboard centre leads
-    return Math.max(0, Math.min(1, x + (isDriverSide(m) ? 0.02 : 0)));
+/** A module as Ambient Config's scenes.js wants a light: { part, y, bus } (see the header). */
+function lightOf(m, handlesTo) {
+    return { part: groupOf(m, handlesTo) === 'top' ? 'upper' : 'lower', y: LIN.place(Number(m.locationId) || 0).y, bus: m.bus - 1 };
 }
+/** One group's colour and brightness as scenes.js has it: { rgb: [r, g, b], bright }. */
+const lookOf = (x) => ({ rgb: [x.colour.r, x.colour.g, x.colour.b], bright: x.brightness });
+/** A moving program as a scenes.js scene. */
+const referenceScene = (p) => ({ kind: p.mode, upper: lookOf(p.top), lower: lookOf(p.bottom), speed: p.speed });
 
 /* ---------- programs ---------- */
 const MODES = Object.freeze(['solid', 'dual', 'zones', 'rainbow', 'fade', 'breathing', 'wave', 'welcome', 'pulse']);
 const MODE_LABELS = Object.freeze({ solid: 'Solid Colour', dual: 'Dual Colour', zones: 'Zones', rainbow: 'Rainbow', fade: 'Smooth Fade', breathing: 'Breathing', wave: 'Colour Wave', welcome: 'Welcome Sweep', pulse: 'Sport Pulse' });
 const ANIMATED = Object.freeze({ rainbow: true, fade: true, breathing: true, wave: true, welcome: true, pulse: true });
+/** The modes that run on (scenes.js KINDS without 'solid'); welcome and pulse run once. */
+const RUNNING = Object.freeze({ rainbow: true, fade: true, breathing: true, wave: true });
 /*
- * The one-time effects and the speed steps follow the MGU App Kit's Ambient Config (apps/ambient_config/scenes.js,
- * MIT, (c) its authors; see THIRD_PARTY.md): welcome = the lights come on from the dash to the rear over 2.6 s,
- * pulse = one long red for 1.5 s of 2 s; speed 1 slow (x1.6 the base time), 2 normal, 3 fast (x0.55).
- * A one-time program runs once and then gives way to its `then` program (null: the car's own lighting).
+ * How long the one-time effects last is scenes.js's to say (welcome 2.6 s, pulse 2 s). A one-time program runs
+ * once and then gives way to its `then` program (null: the car's own lighting), as Ambient Config's lights.js
+ * show() does.
  */
-const ONCE = Object.freeze({ welcome: 2600, pulse: 2000 });
-const PULSE_RED_MS = 1500;
-const SPEED = Object.freeze({ 1: 1.6, 2: 1, 3: 0.55 });
+const ONCE = Object.freeze({ welcome: AC.lasts({ kind: 'welcome' }), pulse: AC.lasts({ kind: 'pulse' }) });
 const SPEED_LABELS = Object.freeze({ 1: 'Slow', 2: 'Normal', 3: 'Fast' });
 /** How long a one-time program lasts (ms); 0 for one that runs on. */
 const onceMs = (p) => (p && ONCE[p.mode]) || 0;
 
+const LOOK = Object.freeze({ top: { colour: { r: 160, g: 60, b: 254 }, brightness: 100 }, bottom: { colour: { r: 90, g: 200, b: 254 }, brightness: 100 } });
+const running = (mode) => Object.assign({ mode }, JSON.parse(JSON.stringify(LOOK)), { speed: 2, handlesTo: 'bottom', zone: 'all' });
 const DEFAULTS = Object.freeze({
     solid: { mode: 'solid', colour: { r: 120, g: 60, b: 254 }, brightness: 100, zone: 'all' },
     dual: { mode: 'dual', top: { colour: { r: 160, g: 60, b: 254 }, brightness: 80 }, bottom: { colour: { r: 90, g: 200, b: 254 }, brightness: 45 }, handlesTo: 'bottom' },
     zones: { mode: 'zones', handlesTo: 'bottom', assignments: [{ zone: 'all', colour: { r: 120, g: 60, b: 254 }, brightness: 100 }] },
-    rainbow: { mode: 'rainbow', periodS: 20, brightness: 100, zone: 'all', saturation: 1 },
-    fade: { mode: 'fade', colours: [{ r: 254, g: 0, b: 0 }, { r: 0, g: 254, b: 0 }, { r: 0, g: 0, b: 254 }], transitionMs: 2000, holdMs: 1000, brightness: 100, zone: 'all' },
-    breathing: { mode: 'breathing', colour: { r: 120, g: 60, b: 254 }, minBrightness: 10, maxBrightness: 100, periodS: 6, zone: 'all' },
-    wave: { mode: 'wave', hueSpan: 120, baseHue: 240, periodS: 8, brightness: 100, zone: 'all', saturation: 1 },
+    rainbow: running('rainbow'), fade: running('fade'), breathing: running('breathing'), wave: running('wave'),
     welcome: { mode: 'welcome', colour: { r: 120, g: 60, b: 254 }, brightness: 100, then: null },
     pulse: { mode: 'pulse', colour: { r: 120, g: 60, b: 254 }, brightness: 100, then: null },
 });
@@ -149,6 +166,7 @@ const DEFAULTS = Object.freeze({
 /** A complete program from a possibly partial one (deep enough for the fields the renderer reads). */
 function normalise(p) {
     const mode = p && MODES.indexOf(p.mode) >= 0 ? p.mode : 'solid';
+    if (RUNNING[mode]) return normaliseRunning(mode, p);
     const d = DEFAULTS[mode];
     const out = JSON.parse(JSON.stringify(d));
     Object.keys(p || {}).forEach((k) => { if (p[k] !== undefined) out[k] = JSON.parse(JSON.stringify(p[k])); });
@@ -159,14 +177,45 @@ function normalise(p) {
     if (out.brightness != null) out.brightness = clampPct(out.brightness);
     if (out.assignments) out.assignments = out.assignments.map((a) => ({ zone: a.zone || 'all', colour: rgb(a.colour), brightness: clampPct(a.brightness == null ? 100 : a.brightness) }));
     if (out.colours) out.colours = out.colours.map(rgb);
-    if (out.minBrightness != null) { out.minBrightness = clampPct(out.minBrightness); out.maxBrightness = clampPct(out.maxBrightness); if (out.minBrightness > out.maxBrightness) { const t = out.minBrightness; out.minBrightness = out.maxBrightness; out.maxBrightness = t; } }
     if (!/^(top|bottom|off)$/.test(out.handlesTo || '')) out.handlesTo = 'bottom';
-    if (out.speed != null) out.speed = SPEED[out.speed] ? Number(out.speed) : 2;
     // a one-time program's follow-on: a complete still or running program, never another one-time one
     if (ONCE[mode]) out.then = out.then && !ONCE[out.then.mode] ? normalise(out.then) : null;
     return out;
 }
 const rgb = (c) => ({ r: clampByte(c && c.r), g: clampByte(c && c.g), b: clampByte(c && c.b) });
+/**
+ * A moving program, complete: the two groups' colour and brightness, the speed step, the handles, the zone, and
+ * nothing else (scenes.js has no other knob). A program saved by 0.5.0 or earlier (its own periods, palettes and
+ * limits) is read for its colours and brightness and runs at normal speed with scenes.js's timing.
+ */
+function normaliseRunning(mode, p) {
+    const d = DEFAULTS[mode], q = p || {};
+    const old = { top: q.colour, bottom: q.colour, brightness: q.brightness != null ? q.brightness : q.maxBrightness };
+    if (Array.isArray(q.colours) && q.colours.length) { old.top = q.colours[0]; old.bottom = q.colours[1] || q.colours[0]; }
+    if (q.baseHue != null && !q.top) { old.top = hsvToRgb(q.baseHue, 1, 1); old.bottom = old.top; }
+    const side = (s) => {
+        const g = q[s] || {};
+        return { colour: rgb(g.colour || old[s] || d[s].colour), brightness: clampPct(g.brightness != null ? g.brightness : old.brightness != null ? old.brightness : d[s].brightness) };
+    };
+    return { mode, top: side('top'), bottom: side('bottom'), speed: SPEED_LABELS[q.speed] ? Number(q.speed) : 2, handlesTo: /^(top|bottom|off)$/.test(q.handlesTo || '') ? q.handlesTo : 'bottom', zone: q.zone || 'all' };
+}
+/**
+ * What each module ends a one-time program on, as scenes.js's `own` ({ rgb, bright }) by module key: the follow-on
+ * program's colours (a moving follow-on: its two groups' colours, as Ambient Config runs the welcome over a look),
+ * or this program's own colour everywhere. A module the follow-on leaves to the car has none.
+ */
+function ownTargets(p, modules, now, opts) {
+    const own = {};
+    if (!p.then) { modules.forEach((m) => { own[key(m)] = { rgb: [p.colour.r, p.colour.g, p.colour.b], bright: p.brightness }; }); return own; }
+    if (RUNNING[p.then.mode]) {
+        const f = zoneFilter(p.then.zone, { handlesTo: p.then.handlesTo });
+        modules.forEach((m) => { const g = groupOf(m, p.then.handlesTo); if (g !== 'off' && f(m)) own[key(m)] = lookOf(p.then[g]); });
+        return own;
+    }
+    const end = render(p.then, modules, now, opts);
+    Object.keys(end).forEach((k) => { own[k] = { rgb: [end[k].r, end[k].g, end[k].b], bright: end[k].brightness }; });
+    return own;
+}
 const isAnimated = (p) => !!(p && ANIMATED[p.mode]);
 
 /**
@@ -177,9 +226,9 @@ function render(program, modules, now, opts) {
     const p = normalise(program);
     const t0 = (opts && opts.phase0) || 0;
     const ms = (now || 0) - t0;
-    const t = ms / 1000 / (SPEED[p.speed] || 1);
     const scene = {};
     const put = (m, colour, brightness) => { scene[key(m)] = { r: clampByte(colour.r), g: clampByte(colour.g), b: clampByte(colour.b), brightness: clampPct(brightness) }; };
+    const show = (m, v) => put(m, { r: v.rgb[0], g: v.rgb[1], b: v.rgb[2] }, v.bright);      // what scenes.js lightAt() returned, as a target
     const inZone = (zone) => { const f = zoneFilter(zone, { handlesTo: p.handlesTo }); return modules.filter((m) => f(m)); };
     switch (p.mode) {
         case 'solid':
@@ -195,49 +244,25 @@ function render(program, modules, now, opts) {
         case 'zones':
             p.assignments.forEach((a) => inZone(a.zone).forEach((m) => put(m, a.colour, a.brightness)));
             break;
-        case 'rainbow': {
-            const h = (t / Math.max(2, p.periodS)) * 360;
-            const c = hsvToRgb(h, p.saturation == null ? 1 : p.saturation, 1);
-            inZone(p.zone).forEach((m) => put(m, c, p.brightness));
-            break;
-        }
-        case 'fade': {
-            const cols = p.colours.length ? p.colours : DEFAULTS.fade.colours;
-            const step = Math.max(50, p.transitionMs) + Math.max(0, p.holdMs);
-            const total = step * cols.length;
-            const u = ((t * 1000) % total + total) % total;
-            const i = Math.floor(u / step), within = u - i * step;
-            const from = cols[i], to = cols[(i + 1) % cols.length];
-            const c = within < p.holdMs ? from : mix(from, to, (within - p.holdMs) / Math.max(50, p.transitionMs));
-            inZone(p.zone).forEach((m) => put(m, c, p.brightness));
-            break;
-        }
-        case 'breathing': {
-            const phase = (t / Math.max(1, p.periodS)) * 2 * Math.PI;
-            const k = (1 - Math.cos(phase)) / 2;                           // 0 .. 1 .. 0, smooth
-            const b = p.minBrightness + (p.maxBrightness - p.minBrightness) * k;
-            inZone(p.zone).forEach((m) => put(m, p.colour, b));
-            break;
-        }
+        case 'rainbow':
+        case 'fade':
+        case 'breathing':
         case 'wave': {
-            const span = p.hueSpan == null ? 120 : p.hueSpan;
+            // Ambient Config's scenes.js says what every light shows at this moment (see the header)
+            const ref = referenceScene(p);
             inZone(p.zone).forEach((m) => {
-                const pos = wavePosition(m);
-                const h = p.baseHue + span * Math.sin(2 * Math.PI * (t / Math.max(2, p.periodS) - pos));
-                put(m, hsvToRgb(h, p.saturation == null ? 1 : p.saturation, 1), p.brightness);
+                if (groupOf(m, p.handlesTo) === 'off') return;           // handles left to the car, as in dual
+                show(m, AC.lightAt(ref, lightOf(m, p.handlesTo), ms));
             });
             break;
         }
         case 'welcome':
         case 'pulse': {
-            // what the lights end on: the follow-on program at this moment, or this program's own colour everywhere
-            const end = p.then ? render(p.then, modules, now, opts) : null;
+            // scenes.js again, over what each module ends on (its `own`): the sweep from the dash to the rear, the red
+            const own = ownTargets(p, modules, now, opts);
             modules.forEach((m) => {
-                const own = end ? end[key(m)] : { r: p.colour.r, g: p.colour.g, b: p.colour.b, brightness: p.brightness };
-                if (!own) return;                                        // a module the follow-on leaves to the car
-                if (p.mode === 'pulse') { if (ms < PULSE_RED_MS) put(m, { r: 254, g: 0, b: 0 }, 100); else put(m, own, own.brightness); return; }
-                const front = ms / ONCE.welcome * 1.4 - 0.2, f = Math.max(0, Math.min(1, (front - wavePosition(m)) / 0.2));
-                put(m, own, own.brightness * f);
+                const o = own[key(m)];
+                if (o) show(m, AC.lightAt({ kind: p.mode, upper: o, lower: o, speed: 2 }, lightOf(m, p.handlesTo), ms));
             });
             break;
         }
@@ -265,10 +290,10 @@ function describe(p, modules) {
         case 'solid': return hex(q.colour) + ' ' + q.brightness + '% ' + zoneLabel(q.zone, modules);
         case 'dual': return 'top ' + hex(q.top.colour) + ' ' + q.top.brightness + '%, bottom ' + hex(q.bottom.colour) + ' ' + q.bottom.brightness + '%';
         case 'zones': return q.assignments.map((a) => zoneLabel(a.zone, modules) + ' ' + hex(a.colour)).join(', ');
-        case 'rainbow': return 'rainbow ' + q.periodS + ' s, ' + q.brightness + '%';
-        case 'fade': return 'fade ' + q.colours.map(hex).join(' ') + ' ' + (q.transitionMs / 1000) + ' s';
-        case 'breathing': return 'breathing ' + hex(q.colour) + ' ' + q.minBrightness + '-' + q.maxBrightness + '% ' + q.periodS + ' s';
-        case 'wave': return 'wave hue ' + q.baseHue + ' ±' + q.hueSpan + ', ' + q.periodS + ' s';
+        case 'rainbow': return 'rainbow, ' + SPEED_LABELS[q.speed].toLowerCase() + ', ' + q.top.brightness + '%';
+        case 'fade': return 'fade ' + hex(q.top.colour) + ' to ' + hex(q.bottom.colour) + ', ' + SPEED_LABELS[q.speed].toLowerCase();
+        case 'breathing': return 'breathing ' + hex(q.top.colour) + (hex(q.top.colour) === hex(q.bottom.colour) ? '' : ' / ' + hex(q.bottom.colour)) + ', ' + SPEED_LABELS[q.speed].toLowerCase();
+        case 'wave': return 'wave around ' + hex(q.top.colour) + ', ' + SPEED_LABELS[q.speed].toLowerCase() + ', ' + q.top.brightness + '%';
         case 'welcome': return 'welcome sweep' + (q.then ? ', then ' + describe(q.then, modules) : '');
         case 'pulse': return 'sport pulse' + (q.then ? ', then ' + describe(q.then, modules) : '');
         default: return q.mode;
@@ -284,8 +309,8 @@ function presetsFromJson(text) {
 
 module.exports = {
     key, clampByte, clampPct, wrapHue, hsvToRgb, rgbToHsv, mix, rgb,
-    CATEGORY, category, isFront, isRear, isDriverSide, groupOf, wavePosition,
+    CATEGORY, category, isFront, isRear, isDriverSide, groupOf, lightOf, lookOf, referenceScene, RUNNING,
     ZONES, ZONE_NAMES, ZONE_LABELS, zoneFilter, zoneLabel,
-    MODES, MODE_LABELS, ANIMATED, ONCE, SPEED, SPEED_LABELS, onceMs, DEFAULTS, normalise, isAnimated, render, diff, describe,
+    MODES, MODE_LABELS, ANIMATED, ONCE, SPEED_LABELS, onceMs, DEFAULTS, normalise, isAnimated, render, diff, describe,
     presetFrom, presetsToJson, presetsFromJson,
 };

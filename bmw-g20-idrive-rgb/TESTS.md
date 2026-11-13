@@ -9,6 +9,25 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
+## Results, 0.5.1 (2026-11-13, Windows 11, Node 24, Python 3.12, kit `64486c5` and kit `89de8c0`)
+
+```
+npm test          TOTAL: 194 passed, 0 failed       (the same against both kit commits)
+npm run test:py   Ran 37 tests ... OK (skipped=8)
+python scripts/build_app.py --ci
+                  OK: ambient_rgb@0.5.1 passed every check (iDrive 7, autostart, no SDK inside)
+```
+
+New in 0.5.1:
+
+| File | Covers |
+|---|---|
+| `tests/node/test_v051.js` (26) | **The reference files**: `ambient_config_scenes.js` and `ambient_config_lin.js` by SHA-256, the MIT notice in the package, no trigonometry of its own left in `lighting_scene.js`; this car's 19 modules against the reference's own G20 lights (bus, address, location, part, place). **Animation output against `scenes.lightAt()`**: Rainbow, Breathing, Fade and Wave for every module at 178 moments and at Slow, Normal and Fast (over 30,000 comparisons); the three speeds as scaled time and the four periods; Welcome and Pulse over a dual, a breathing and a rainbow follow-on; **on the wire**: every frame the controller sends equals `lightAt()` at the moment the frame was made, in `lin.js` `writeFrame()`'s own bytes, for the four modes and three speeds. **Whole-bus updates**: Rainbow, Fade and Wave two writes a frame; Dual and Breathing the majority colour to the bus and single writes for the exceptions, front to back; single-write mode shows the same colours. **No obsolete frames**: at 200 ms a write each frame is written out before the next is made, from the time it is then; never more than one frame in the scheduler, nothing dropped; 5 s hold and 3 s renewal; Apply answers without waiting for the read-back, which runs 1.5 s later and is cancelled by a new Apply; writes wait while a read has the link. **Doors during Rainbow and Colour Wave**, each of the four doors: one release to the door's line, no write to it and no whole-bus write on its bus while open, the other bus still whole, the animation moving on, the line back at the current phase and in step when it closes, the time origin untouched; two doors on two buses; a release nobody answers sent once. **Handing back**: Restore OEM as `lin.js` `releaseFrame(bus, 0)` on bus 1 then bus 2, sequentially, also with single colour writes; the car locked (states 1, 2, 3) with no request afterwards; factory lighting off with one read-back; a module that missed the release found and released singly; link gone (nothing sent) and body controller silent (each release once), ZEIT expiry; a lapse; the platform's stop with a door open; a car refusing NAD 0. **Settings and screen**: the defaults, no roof lamp among the modules, every mode's page drawn and rasterised with no overlapping controls. |
+
+Changed for 0.5.1: `test_scene.js` (13: the animation cases now state the reference's figures and how a program saved by 0.5.0 loads), `test_controller.js` (the two-write release, front-to-back order), `test_v040.js` (28: the release planner's new rules, the background read-back), `test_v050.js` (45: the red door blink's tests are replaced by the door handback's; the read-back cases wait for the background check).
+
+Also done by hand for 0.5.1: the Modes pages (Colour Wave, Breathing, Welcome, Rainbow), Diagnostics and Driving rendered at 1600 x 520 from the harness and looked at (`docs/screens/07`, `08`, `10`, `12`, `13` are these).
+
 ## Results, 0.5.0 (2026-11-12, Windows 11, Node 24, Python 3.12, kit `64486c5`)
 
 ```
@@ -18,7 +37,7 @@ python scripts/build_app.py
                   OK: ambient_rgb@0.5.0 passed every check (iDrive 7, autostart, no SDK inside)
 ```
 
-New in 0.5.0:
+New in 0.5.0 (the door-flash cases named below were replaced in 0.5.1):
 
 | File | Covers |
 |---|---|
@@ -29,7 +48,7 @@ Also run by hand for 0.5.0: every page rendered at 1600 x 520 from the harness a
 found are in the changelog), and in the kit's live emulator (`npm run emu`) the knob walked the Modes list to
 its last row (Sport Pulse) and selected it.
 
-## Node (166 tests, all passing; the table below is the 121 from 0.4.0)
+## Node (194 tests, all passing; the table below is the 121 from 0.4.0)
 
 | File | Covers |
 |---|---|

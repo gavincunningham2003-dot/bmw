@@ -6,7 +6,8 @@
  *   COLOURS    a list of the ways to light the cabin, the hue ring with the colour in its middle, a brightness
  *              dial, saturation, the cabin from above lit as it would be, a zone picker, Apply / Cancel
  *   DUAL       upper and lower lighting with their own colour and brightness; swap, copy, save, Apply both
- *   MODES      Solid, Dual, Rainbow, Smooth Fade, Breathing, Colour Wave with their settings; Apply
+ *   MODES      Solid, Dual, and Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome
+ *              Sweep, Sport Pulse: lighting_scene.js) with their upper / lower colours and speed; Apply
  *   FAVOURITES saved colours and saved complete configurations (colours, brightness, zones, mode, animation)
  *   DIAGNOSTICS link, body controller, transport performance, write controls
  *
@@ -110,7 +111,7 @@ mgu.run({
             if (mode === 'dual') return dualProgram();
             // the one-time effects end on what is applied now, else on the Colours page's colour
             if (S.ONCE[mode]) return { mode, then: still(ctl.program) || { mode: 'solid', colour: rgbOf(draft.colours.hsv), brightness: draft.colours.brightness, zone: 'all' } };
-            return Object.assign({}, draft.modes.params[mode], { mode });
+            return Object.assign({}, draft.modes.params[mode], { mode, handlesTo: settings.get('handles') || 'bottom' });
         }
         const pageProgram = () => (page === 0 ? coloursProgram() : page === 1 ? dualProgram() : page === 2 ? modesProgram() : null);
 
@@ -296,16 +297,15 @@ mgu.run({
         }
 
         /* ---------- MODES ---------- */
+        // The moving modes are Ambient Config's (lighting_scene.js): their timing is that app's, and the only knobs it
+        // has are the two groups' colours and brightness and the speed step (1 slow, 2 normal, 3 fast).
+        const SPEED_ROW = ['speed', 'Speed', 1, 1, 3, (v) => S.SPEED_LABELS[v] || String(v)];
         const MODE_PARAMS = {
-            rainbow: [['periodS', 'Seconds per turn', 1, 2, 120], ['brightness', 'Brightness %', 5, 0, 100]],
-            fade: [['transitionMs', 'Transition ms', 250, 250, 10000], ['holdMs', 'Hold ms', 250, 0, 10000], ['brightness', 'Brightness %', 5, 0, 100]],
-            breathing: [['minBrightness', 'Min %', 5, 0, 100], ['maxBrightness', 'Max %', 5, 0, 100], ['periodS', 'Seconds per breath', 1, 1, 30]],
-            wave: [['periodS', 'Seconds per wave', 1, 2, 60], ['hueSpan', 'Hue span', 10, 10, 180], ['baseHue', 'Base hue', 10, 0, 350], ['brightness', 'Brightness %', 5, 0, 100]],
+            rainbow: [SPEED_ROW], fade: [SPEED_ROW], breathing: [SPEED_ROW], wave: [SPEED_ROW],
             solid: [['brightness', 'Brightness %', 5, 0, 100]],
             dual: [], welcome: [], pulse: [],
         };
-        // the moving modes' speed step (1 slow, 2 normal, 3 fast), as Ambient Config has it
-        ['rainbow', 'fade', 'breathing', 'wave'].forEach((m) => MODE_PARAMS[m].push(['speed', 'Speed (1-3)', 1, 1, 3]));
+        const sideOf = (s) => ({ colour: rgbOf(s.hsv), brightness: s.brightness });
         function drawModes(cv, t) {
             editor.reset();
             const d = draft.modes, mode = MODE_ORDER[d.mode], params = d.params[mode];
@@ -321,36 +321,31 @@ mgu.run({
             // the selected mode's settings
             const P = { x: 480, y: 60, w: 1100, h: 452 };
             G.panel(cv, t, P.x, P.y, P.w, P.h, S.MODE_LABELS[mode]);
-            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'All colours in turn, slowly.', fade: 'Glides from colour to colour through the palette, holding each.', breathing: 'The brightness rises and falls between the limits.', wave: 'A hue wave travelling from the dashboard to the rear.', welcome: 'Once: the lights come on from the dashboard to the rear, then stay on what is applied now.', pulse: 'Once: red for a moment, then back to what is applied now (the Sport greeting).' }[mode];
+            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'The whole cabin through every colour, at the upper brightness.', fade: 'Every light glides from the upper colour to the lower one and back.', breathing: 'Upper and lower lighting breathe, each in its own colour.', wave: 'A band of colour around the upper colour, rolling from the passenger doors to the dash and the driver doors.', welcome: 'Once: the lights come on from the dashboard to the rear, then stay on what is applied now.', pulse: 'Once: red for a moment, then back to what is applied now (the Sport greeting).' }[mode];
             cv.text(help, P.x + 24, P.y + 72, 17, t.dim);
             let px = P.x + 80, py = P.y + 116;
             (MODE_PARAMS[mode] || []).forEach((row) => {
-                const [k, label, step, min, max] = row;
+                const [k, label, step, min, max, show] = row;
                 const get = () => Number(params[k]), set = (v) => { params[k] = Math.max(min, Math.min(max, v)); markDirty('modes'); };
                 editor.control({ key: 'p:' + k, get, set, step, min, max });
-                W.stepper(cv, t, px, py, 150, label, get(), () => set(get() - step), () => set(get() + step), 'p:' + k, { editing: editor.isEditing('p:' + k) });
+                W.stepper(cv, t, px, py, 150, label, show ? show(get()) : get(), () => set(get() - step), () => set(get() + step), 'p:' + k, { editing: editor.isEditing('p:' + k) });
                 cv.target(px, py, 150, 46, enter('p:' + k), 'p:' + k);
                 px += 290;
                 if (px > P.x + P.w - 220) { px = P.x + 80; py += 84; }
             });
-            if (mode === 'fade') {
-                cv.text('PALETTE', P.x + 24, P.y + 288, 13, t.dim, { font: 'bold', spacing: 2 });
-                let cx = P.x + 24;
-                params.colours.forEach((col, i) => {
-                    cv.roundRect(cx, P.y + 296, 70, 40, 8, C.rgbToHex(col));
-                    cv.target(cx, P.y + 296, 70, 40, () => { params.colours.splice(i, 1); if (!params.colours.length) params.colours.push({ r: 254, g: 0, b: 0 }); markDirty('modes'); }, 'pal:' + i);
-                    cx += 78;
-                });
-                G.button(cv, t, cx + 10, P.y + 294, 0, 44, 'Add current colour', () => { if (params.colours.length < 8) { params.colours.push(rgbOf(draft.colours.hsv)); markDirty('modes'); } }, { key: 'addcol' });
+            if (S.RUNNING[mode]) {
+                // the two groups' colours: Ambient Config's upper and lower (taken from the Colours or the Dual page)
+                W.swatch(cv, t, P.x + 24, P.y + 206, 200, 62, params.top.colour, 'upper ' + params.top.brightness + '%', { size: 20, radius: 12 });
+                W.swatch(cv, t, P.x + 240, P.y + 206, 200, 62, params.bottom.colour, 'lower ' + params.bottom.brightness + '%', { size: 20, radius: 12 });
+                let ux = P.x + 24;
+                ux += G.button(cv, t, ux, P.y + 284, 0, 44, 'Use Colours page colour', () => { params.top = sideOf(draft.colours); params.bottom = sideOf(draft.colours); markDirty('modes'); }, { key: 'usecol' }) + 10;
+                G.button(cv, t, ux, P.y + 284, 0, 44, 'Use Dual page colours', () => { params.top = sideOf(draft.dual.top); params.bottom = sideOf(draft.dual.bottom); markDirty('modes'); }, { key: 'usedual' });
+                const whole = ctl.txMode === 'broadcast' && ctl.broadcastOk;
+                cv.text((whole ? 'Whole-bus writes: 2 writes a frame for Rainbow, Fade and Wave' : 'Single writes: ' + ctl.slaves.length + ' a frame (Settings: Writes to the car)') + (ctl.program && ctl.program.mode === mode ? '   ·   now ' + ctl.fps() + ' frames/s' : ''), P.x + 470, P.y + 244, 15, t.dim);
             }
-            if (mode === 'breathing' || mode === 'solid') {
-                const col = mode === 'breathing' ? params.colour : rgbOf(draft.colours.hsv);
-                W.swatch(cv, t, P.x + 24, P.y + 278, 200, 62, col, 'colour', { size: 20, radius: 12 });
-                G.button(cv, t, P.x + 240, P.y + 290, 0, 44, 'Use Colours page colour', () => { if (mode === 'breathing') params.colour = rgbOf(draft.colours.hsv); else { params.colour = rgbOf(draft.colours.hsv); } markDirty('modes'); }, { key: 'usecol' });
-            }
-            if (mode === 'wave') {
-                const rps = ctl.scheduler.stats.avgLatencyMs ? Math.round(1000 / (ctl.scheduler.stats.avgLatencyMs * Math.max(1, ctl.slaves.length))) : null;
-                cv.text('Needs a few frames a second across the cabin: ' + (rps == null ? 'throughput not measured yet' : 'about ' + rps + ' frames/s with this link') + (rps != null && rps < 2 ? ' (too slow for a smooth wave)' : ''), P.x + 24, P.y + 318, 15, rps != null && rps < 2 ? t.warn : t.dim);
+            if (mode === 'solid') {
+                W.swatch(cv, t, P.x + 24, P.y + 278, 200, 62, rgbOf(draft.colours.hsv), 'colour', { size: 20, radius: 12 });
+                G.button(cv, t, P.x + 240, P.y + 290, 0, 44, 'Use Colours page colour', () => { params.colour = rgbOf(draft.colours.hsv); markDirty('modes'); }, { key: 'usecol' });
             }
             if (S.ONCE[mode]) cv.text('Ends on: ' + (still(ctl.program) ? S.describe(still(ctl.program), ctl.slaves) : 'the Colours page colour'), P.x + 24, P.y + 300, 17, t.text);
             const sx = applyRow(cv, t, P.x + 24, P.y + 352, 48, S.isAnimated({ mode }) ? (S.ONCE[mode] ? 'Run ' : 'Start ') + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
@@ -416,8 +411,8 @@ mgu.run({
             let bx = 36;
             bx += toggle('modeFollow', 'Follow driving mode', 'dm:follow');
             bx += toggle('sportPulse', 'Sport pulse', 'dm:pulse');
-            // the effects over the lighting: each off until switched on, each switched off again here
-            bx += toggle('doorFlash', 'Open door red flash', 'fx:door');
+            // what the car's signals do to the lighting, each with its switch (an open door's line goes back to BMW: on from the start)
+            bx += toggle('doorRelease', 'Open door: BMW light', 'fx:door');
             bx += toggle('turnGlow', 'Indicator glow', 'fx:turn');
             bx += toggle('nightDim', 'Night dimming', 'fx:night');
             cv.text('The car says: ' + drive.summary()[1] + (drive.seen.length ? '   seen: ' + drive.seen.join(', ') : '') + '   ·   ' + svc.car.summary(), 44, 436, 14, t.dim);
@@ -436,14 +431,14 @@ mgu.run({
                 ['Modules', s.slaves.length + ' (' + s.slaves.filter((m) => m.bus === 1).length + ' on bus 1, ' + s.slaves.filter((m) => m.bus === 2).length + ' on bus 2), ' + s.driven + ' driven'],
                 ['Applied', s.description],
                 ['Writes', (sc.writes || 0) + ' sent, ' + (sc.accepted || 0) + ' ok, ' + (sc.rejected || 0) + ' refused, ' + (sc.busy || 0) + ' busy (' + (sc.maxBusyRetries == null ? '?' : sc.maxBusyRetries) + ' retries), ' + (sc.timeouts || 0) + ' unanswered (never resent), ' + (sc.skipped || 0) + ' skipped'],
-                ['Transport', (s.txMode === 'broadcast' ? (s.broadcastOk ? 'whole-bus writes (' + (s.stats.broadcasts || 0) + (s.deaf && s.deaf.length ? ', single for ' + s.deaf.join(' ') : '') + '), ' : 'whole-bus refused: single writes, ') : '') + (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
-                ['Keep-alive', 'ZEIT ' + s.holdSeconds + ' s, refresh at ' + Math.round(s.holdSeconds * ctl.keepAliveFactor) + ' s; ' + (s.verify ? (s.stats.confirmed || 0) + ' read back ok, ' + (s.stats.missed || 0) + ' missed; ' : '') + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
-                ['Animation', s.animated ? s.fps + ' frames/s, ' + s.stats.frames + ' frames, ' + s.stats.framesDropped + ' dropped' : 'none'],
+                ['Transport', (s.txMode === 'broadcast' ? (s.broadcastOk ? 'whole-bus writes (' + (s.stats.broadcasts || 0) + (s.deaf && s.deaf.length ? ', single for ' + s.deaf.join(' ') : '') + '), ' : 'whole-bus refused: single writes, ') : '') + (s.stats.busReleases ? s.stats.busReleases + ' whole-bus releases, ' : '') + (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
+                ['Keep-alive', 'ZEIT ' + s.holdSeconds + ' s, renewed after ' + Math.round(s.renewMs / 100) / 10 + ' s; ' + (s.stats.verified ? (s.stats.confirmed || 0) + ' read back ok, ' + (s.stats.missed || 0) + ' missed' + (s.verifying ? ' (reading)' : '') + '; ' : '') + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
+                ['Animation', s.moving ? s.fps + ' frames/s, ' + (s.stats.framesWritten || 0) + ' frames written, none queued' : 'none'],
                 ['Parking', s.parkedPolicy + (svc.parked ? ', speed ' + (svc.parked.speed() == null ? 'unknown' : Math.round(svc.parked.speed()) + ' km/h') : ', no speed signal')],
                 ['Factory light', oem.summary()[0]],
                 ['Factory colour', oem.summary()[1]],
                 ['Car', drive.summary()[0] + '; mode ' + drive.summary()[1]],
-                ['Effects', svc.car.summary()],
+                ['Signals', svc.car.summary() + (s.released && s.released.length ? '; with BMW: ' + s.released.join(' ') : '')],
                 ['Gate', s.gate || 'open'],
             ];
             G.table(cv, t, 36, 94, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 20, size: 14 });

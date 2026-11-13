@@ -98,12 +98,14 @@ The app starts with **Lighting link = Simulated BDC** and **Write to the car = D
 
 Everything new in 0.4.0 is off or on its safe value after an install. Switch things on one at a time, parked:
 
-1. **First use as in part E**, with *Writes to the car* left on *One per module*.
-2. **The whole-bus write**, from the laptop first: `python write_test.py --gateway <ip> broadcast --bus 1 --rgb 00FE00`
-   and the same with `--bus 2`. Only if both say every module took the colour, set *Writes to the car* to
-   *Whole bus where it saves writes*. The Diagnostics page then counts the whole-bus writes; if the car ever
-   refuses one, the app goes back to single writes by itself and says so there.
-3. **Read back after Apply**: on, apply a colour, and check Diagnostics reports 19 read back ok.
+1. **First use as in part E.** From 0.5.1 *Writes to the car* starts on *Whole bus where it saves writes*
+   (seen on this car from the laptop on 2026-11-12); *One per module* is the setting to fall back on.
+2. **The whole-bus write**, from the laptop if you want to see it first: `python write_test.py --gateway <ip> broadcast --bus 1 --rgb 00FE00`
+   and the same with `--bus 2`. In the app the Diagnostics page counts the whole-bus writes and lists a
+   module that needed its own write ("single for"); if the car ever refuses one, the app goes back to single
+   writes by itself and says so there.
+3. **Read-back**: apply a colour, wait two seconds, and check Diagnostics reports 19 read back ok (with
+   whole-bus writes the read-back runs by itself, in the background; Apply does not wait for it).
 4. **Factory lighting off** and **lock and leave**: with a colour applied, switch the factory ambient lighting
    off, then lock the car and walk away. Each must release the lighting (Diagnostics, "Gate"). Only after this
    raise the hold time (ZEIT) above 10 s.
@@ -114,7 +116,7 @@ Everything new in 0.4.0 is off or on its safe value after an install. Switch thi
 Build, test and install commands are unchanged: `npm test`, `npm run test:py`, `python scripts/build_app.py`,
 then part D.
 
-## H. 0.5.0: install through MGU Store (the preferred way)
+## H. 0.5.1: install through MGU Store (the preferred way)
 
 [MGU Store](https://github.com/robertnisipeanu/mgu-store) is an app on the head unit that installs other apps
 from GitHub releases. This is the way that gives the app its **background start** (the Store's installer lists
@@ -130,11 +132,11 @@ nothing in this repository does them.
 committed on `main`:
 
 ```powershell
-git tag v0.5.0
+git tag v0.5.1
 ```
 
 ```powershell
-git push origin main v0.5.0
+git push origin main v0.5.1
 ```
 
 ```powershell
@@ -147,9 +149,9 @@ powershell -ExecutionPolicy Bypass -File scripts\release.ps1
    **Add token** (a fine-grained GitHub token for this repository only, **Contents: Read-only**), or
    **Sign in with GitHub**. Typing is easier from the Store's phone page (Settings → **Phone access**).
 2. Store → Settings → **Add source** → `gavincunningham2003-dot/bmw` → **Releases**.
-3. Store → Settings → **Check now**. **Ambient RGB 0.5.0** appears in the list.
+3. Store → Settings → **Check now**. **Ambient RGB 0.5.1** appears in the list.
 
-No internet in the car: copy `dist\ambient_rgb@0.5.0.tgz` into a folder named `oap` on a USB stick, plug it in,
+No internet in the car: copy `dist\ambient_rgb@0.5.1.tgz` into a folder named `oap` on a USB stick, plug it in,
 and use the Store's **USB** tab instead of steps 1 to 3.
 
 ### H3. Install
@@ -159,14 +161,18 @@ and use the Store's **USB** tab instead of steps 1 to 3.
 2. Wait for the Store to say it is installed (the app platform restarts once; a minute or two).
 3. The app starts by itself from now on. It is on **Simulated BDC** and **Disarmed**, with every effect off:
    nothing is written to the car until you change that. Open it and go through part E, then part G, then:
-4. **0.5.0 checks, one at a time, parked** (each is an item of [UNVERIFIED.md](UNVERIFIED.md)):
+4. **0.5.0 and 0.5.1 checks, one at a time, parked** (each is an item of [UNVERIFIED.md](UNVERIFIED.md)):
    - Diagnostics → **Factory light** and **Car**: they must show values (`on`, `in use (5)`), not
      "not reachable". If Factory light stays unknown, the app will refuse to apply: that is the safe
      behaviour; note what it shows before switching *Factory ambient lighting off* to *Keep custom lighting*.
    - Apply a colour, close the app (HOME): the colour must stay. Switch the factory ambient lighting off in
      iDrive: it must release at once. Switch it on again: the factory colour must stay.
    - Apply again, lock the car and walk away: released within seconds. Check the car goes to sleep as usual.
-   - Driving page → **Open door red flash: ON**, open each door in turn: that door's line, red, and back.
+   - With a colour applied, open each door in turn (Driving page → **Open door: BMW light** is ON from the
+     start): that door's contour line must leave the custom colour for whatever BMW shows on it, every other
+     light must keep its colour, and the line must take the colour again when the door closes. Then the same
+     during **Rainbow** and **Colour Wave**: the animation must run on around the open door.
+   - **Restore OEM**, and locking the car, with an animation running: all 19 lights back at once.
    - **Indicator glow: ON** (parked, ignition on, indicate left and right): the side must match; if it is
      mirrored, set *Steering wheel side* in Settings.
    - Switch any of them off again on the same page: the effect must stop at once.

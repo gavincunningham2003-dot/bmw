@@ -38,9 +38,12 @@ test('apply(solid) writes every module once with the colour and ZEIT, reports th
     const { c, clock } = make();
     await c.connect();
     const r = await c.apply(SOLID);
-    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0 });
+    assert.deepStrictEqual(r, { ok: true, written: 19, failed: 0, unanswered: 0, released: 0, verifying: false });
     assert.strictEqual(writes(c).length, 19);
-    assert.deepStrictEqual(writes(c)[0].data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 0, 10]);
+    assert.deepStrictEqual(writes(c).find((w) => w.data[0] === 0xDA && w.data[2] === 1).data, [0xDA, 0x5E, 1, 1, 100, 254, 0, 0, 10]);
+    // each bus front to back (Ambient Config's order): bus 1 starts with the passenger front door line, bus 2 with the dash
+    assert.deepStrictEqual(writes(c).slice(0, 2).map((w) => w.data[2]), [3, 2]);
+    assert.deepStrictEqual(writes(c).slice(7, 10).map((w) => w.data[2]).sort(), [1, 2, 3], 'the three dash lines first on bus 2');
     assert.deepStrictEqual(phys(c, '2:1'), [254, 0, 0, 100, 'custom']);
     assert.strictEqual(c.custom, true);
     await clock.advance(4000);
@@ -76,14 +79,18 @@ test('changing one zone keeps the others: a zones program', async () => {
     assert.deepStrictEqual(phys(c, '2:1'), [1, 1, 1, 50, 'custom']);
     assert.strictEqual(writes(c).length, 19 + 19, 'the second apply forced a full round (apply always refreshes)');
 });
-test('restoreOem releases every driven module with ZUSTAND 0 and reports exactly what happened', async () => {
+test('restoreOem hands the whole cabin back in TWO writes (NAD 0, ZUSTAND 0, one a bus) and reports exactly what happened', async () => {
     const { c, clock } = make();
     await c.connect();
     await c.apply(SOLID);
     const r = await c.restoreOem();
     assert.deepStrictEqual(r, { ok: true, released: 19, failed: [], pending: 0, reason: undefined });
-    const rel = writes(c).slice(-19);
-    assert.ok(rel.every((w) => w.data[3] === 0 && w.data[8] === 0));
+    // single colour writes (this controller's default), and still one release a bus: Ambient Config's give-back
+    assert.strictEqual(writes(c).length, 19 + 2);
+    const rel = writes(c).slice(-2);
+    assert.deepStrictEqual(rel.map((w) => w.data), [[0xDA, 0x5E, 0, 0, 0, 0, 0, 0, 0], [0xE3, 0xD1, 0, 0, 0, 0, 0, 0, 0]], 'bus 1, then bus 2, one after the other');
+    assert.strictEqual(c.stats.busReleases, 2);
+    assert.ok(c.slaves.every((s) => phys(c, s.bus + ':' + s.nad)[4] === 'oem'), 'all 19 are the car\'s again');
     assert.strictEqual(phys(c, '2:1')[4], 'oem');
     assert.strictEqual(c.program, null);
     assert.strictEqual(c.driven.size, 0);
@@ -96,8 +103,11 @@ test('restoreOem never claims success when a release was refused', async () => {
     const { c, bdc } = make();
     await c.connect();
     await c.apply(SOLID);
+    // a car that takes no NAD 0: the release falls back to one a module, and one of those is refused
+    bdc.noBroadcast = true;
     bdc.rejectKeys.add('2:4');
     const r = await c.restoreOem();
+    assert.strictEqual(c.broadcastOk, false);
     assert.strictEqual(r.ok, false);
     assert.deepStrictEqual(r.failed, ['2:4']);
     assert.strictEqual(r.released, 18);
@@ -154,10 +164,10 @@ test('parking policy: strict blocks apply when the state is unknown or moving (f
     assert.strictEqual(refused.length, 2);
     assert.strictEqual(writes(c).length, 19, 'nothing was written while blocked');
 });
-test('animated programs tick: frames are paced to the measured transport, unchanged modules are skipped, stale ones forced', async () => {
+test('animated programs tick: each frame is written out before the next is made, unchanged modules are skipped, stale ones forced', async () => {
     const { c, clock } = make({}, { latencyMs: 14, frameMs: 80 });
     await c.connect();
-    const r = await applyAdv(c, clock, { mode: 'rainbow', periodS: 10, brightness: 100, zone: 'all' }, 400);
+    const r = await applyAdv(c, clock, { mode: 'rainbow', zone: 'all' }, 400);
     assert.strictEqual(r.ok, true);
     const n0 = writes(c).length;
     await clock.advance(3000);
@@ -177,7 +187,7 @@ test('animated programs tick: frames are paced to the measured transport, unchan
 test('breathing changes brightness only; a static apply after an animation stops the ticker', async () => {
     const { c, clock } = make({}, { latencyMs: 1 });
     await c.connect();
-    await applyAdv(c, clock, { mode: 'breathing', colour: { r: 10, g: 20, b: 30 }, minBrightness: 10, maxBrightness: 90, periodS: 4, zone: 'dashboard' }, 100);
+    await applyAdv(c, clock, { mode: 'breathing', top: { colour: { r: 10, g: 20, b: 30 }, brightness: 90 }, bottom: { colour: { r: 10, g: 20, b: 30 }, brightness: 90 }, zone: 'dashboard' }, 100);
     await clock.advance(1000);
     const a = phys(c, '2:1');
     await clock.advance(1000);

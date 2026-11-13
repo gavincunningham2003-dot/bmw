@@ -1,32 +1,36 @@
 'use strict';
 /**
- * lighting_overlay.js - temporary effects laid OVER the applied lighting, module by module. Pure.
+ * lighting_overlay.js - what the car's signals change about the applied lighting, module by module. Pure.
  *
- *   doors   an open door: that door's contour line blinks RED until the door closes
+ *   doors   an open door: that door's contour line is HANDED BACK TO BMW until the door closes. Nothing is shown
+ *           on it by this app (no red, no black, no blink): the module simply has no target, so the controller
+ *           releases it with the factory handback (ZUSTAND 0) and writes nothing to it, and BMW shows its own
+ *           door-warning light. Every other light keeps its colour or its animation.
  *   turn    a turn indicator: that side's door contour lines blink GREEN with it (hazards: both sides)
- *   dim     night: the applied lighting at a fraction of its brightness (the effects above stay at full)
+ *   dim     night: the applied lighting at a fraction of its brightness (the indicator's green stays at full)
  *
- * The idea and the look (door line only, fully on and fully dark, red over green) are those of the MGU App Kit's
- * Ambient Config (apps/ambient_config/control.js, MIT, (c) its authors; THIRD_PARTY.md); the code here is this
- * project's own and works on its scene model:
+ * 0.5.0 blinked an open door's line red itself (the look of Ambient Config's control.js `doorRed`). 0.5.1 removed
+ * that: the factory lighting has priority, and the car's own warning is the car's to show. The indicator glow keeps
+ * the look of Ambient Config's control.js `turnGlow` (door line only, fully on and fully dark; MIT, (c) its
+ * authors; THIRD_PARTY.md); the code is this project's own and works on its scene model:
  *
  *   compose(base, modules, state, now) -> scene
  *     base     { 'bus:nad': { r, g, b, brightness } }   the applied program's scene at `now` ({} = the car's own lighting)
  *     modules  the modules the body controller reported ({ bus, nad, locationId }): the door a module belongs to
  *              comes from its installation LOCATION, never from a fixed LIN address
- *     state    { doors: [door...], doorsSince, turn: [side...], turnSince, dim }
+ *     state    { doors: [door...], turn: [side...], turnSince, dim }
  *
- * The base scene is rendered by the controller with its own time origin and is not touched: when an effect ends,
- * the module simply shows what the base says at that moment, so a running animation keeps its phase. A module
- * the base leaves to the car (no target) is absent from the result once its effect ends, and the controller hands
- * it back.
+ * The base scene is rendered by the controller with its own time origin and is not touched: when a door closes,
+ * its module is back in the scene with what the base says AT THAT MOMENT, so a running animation carries on in
+ * step (its phase was never stopped). A module absent from the result is one the controller must not write: not
+ * singly, not in a keep-alive, and not through a whole-bus (NAD 0) write, which lighting_plan.js refuses for a bus
+ * with such a module.
  *
  * Only interior FI-LIN modules can appear in a scene at all (the write gate in lighting_protocol.js allows
- * nothing else), and of those only category 'doorLine': no exterior light, no other lamp.
+ * nothing else), and of those only category 'doorLine' is touched here: no exterior light, no other lamp.
  */
 const S = require('./lighting_scene');
 
-const RED = Object.freeze({ r: 254, g: 0, b: 0 });                 // (0xFF is "no change" on this BDC: 254 is full)
 const GREEN = Object.freeze({ r: 0, g: 230, b: 60 });
 const DARK = Object.freeze({ r: 0, g: 0, b: 0, brightness: 0 });
 const BLINK_MS = 400;                                              // on for this long, dark for this long
@@ -46,18 +50,24 @@ const doorModules = (modules, door) => modules.filter((m) => doorOf(m) === door)
 const sideModules = (modules, side) => modules.filter((m) => sideOf(m) === side);
 
 const on = (since, now, blinkMs) => Math.floor(Math.max(0, now - (since || 0)) / (blinkMs || BLINK_MS)) % 2 === 0;
-const active = (st) => !!st && ((st.doors && st.doors.length > 0) || (st.turn && st.turn.length > 0));
-/** Does the scene change with time because of the state (an effect is blinking)? */
-const moving = (st, modules) => active(st) && keysOf(st, modules).length > 0;
-
-/** The module keys the state's effects reach. */
-function keysOf(st, modules) {
+/** The module keys handed back to BMW because their door is open. */
+function releasedKeys(st, modules) {
     const keys = new Set();
-    if (!st) return [];
-    (st.turn || []).forEach((side) => sideModules(modules, side).forEach((m) => keys.add(S.key(m))));
-    (st.doors || []).forEach((d) => doorModules(modules, d).forEach((m) => keys.add(S.key(m))));
+    ((st && st.doors) || []).forEach((d) => doorModules(modules, d).forEach((m) => keys.add(S.key(m))));
     return Array.from(keys);
 }
+/** The module keys the indicator glow blinks (a line whose door is open is BMW's, not ours). */
+function glowKeys(st, modules) {
+    const keys = new Set(), gone = new Set(releasedKeys(st, modules));
+    ((st && st.turn) || []).forEach((side) => sideModules(modules, side).forEach((m) => { if (!gone.has(S.key(m))) keys.add(S.key(m)); }));
+    return Array.from(keys);
+}
+/** Is any signal changing the lighting now? */
+const active = (st) => !!st && ((st.doors && st.doors.length > 0) || (st.turn && st.turn.length > 0));
+/** Does the scene change with time because of the state (the indicator glow is blinking)? An open door does not. */
+const moving = (st, modules) => glowKeys(st, modules).length > 0;
+/** The module keys the state's signals reach: the glow's and the released ones. */
+const keysOf = (st, modules) => Array.from(new Set(glowKeys(st, modules).concat(releasedKeys(st, modules))));
 
 function compose(base, modules, state, now) {
     const st = state || {};
@@ -65,11 +75,13 @@ function compose(base, modules, state, now) {
     const scene = {};
     Object.keys(base || {}).forEach((k) => { const t = base[k]; scene[k] = dim === 1 ? t : { r: t.r, g: t.g, b: t.b, brightness: Math.round(t.brightness * dim) }; });
     const blink = st.blinkMs || BLINK_MS;
-    const put = (m, colour, lit) => { scene[S.key(m)] = lit ? { r: colour.r, g: colour.g, b: colour.b, brightness: 100 } : Object.assign({}, DARK); };
-    // green first, red after it: an open door's red wins over the indicator on the same line
-    if (st.turn && st.turn.length) { const lit = on(st.turnSince, now, blink); st.turn.forEach((side) => sideModules(modules, side).forEach((m) => put(m, GREEN, lit))); }
-    if (st.doors && st.doors.length) { const lit = on(st.doorsSince, now, blink); st.doors.forEach((d) => doorModules(modules, d).forEach((m) => put(m, RED, lit))); }
+    if (st.turn && st.turn.length) {
+        const lit = on(st.turnSince, now, blink);
+        st.turn.forEach((side) => sideModules(modules, side).forEach((m) => { scene[S.key(m)] = lit ? { r: GREEN.r, g: GREEN.g, b: GREEN.b, brightness: 100 } : Object.assign({}, DARK); }));
+    }
+    // last, so it wins over everything: an open door's line has NO target (BMW's, until the door closes)
+    releasedKeys(st, modules).forEach((k) => { delete scene[k]; });
     return scene;
 }
 
-module.exports = { compose, active, moving, keysOf, doorOf, sideOf, doorModules, sideModules, RED, GREEN, DARK, BLINK_MS, DOORS, DOOR_LOCATIONS };
+module.exports = { compose, active, moving, keysOf, releasedKeys, glowKeys, doorOf, sideOf, doorModules, sideModules, GREEN, DARK, BLINK_MS, DOORS, DOOR_LOCATIONS };
