@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) written a whole LIN bus at a time, lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
-  "version": "0.5.2",
+  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) written a whole LIN bus at a time and previewed on the cabin view in the car's active colours, still colours written one module at a time, lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
+  "version": "0.5.3",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -168,29 +168,29 @@
     },
     {
       "key": "txMode",
-      "label": "Writes to the car",
+      "label": "How animations are written",
       "type": "choice",
       "default": "broadcast",
       "options": [
         [
           "broadcast",
-          "Whole bus where it saves writes (NAD 0, read back afterwards)"
+          "Whole bus (NAD 0); still colours always one write per module"
         ],
         [
           "individual",
-          "One per module (handing back still uses the whole bus)"
+          "One per module for animations too (handing back still uses the whole bus)"
         ]
       ]
     },
     {
       "key": "verify",
-      "label": "Read back after Apply (single writes)",
+      "label": "Read back after a still colour is applied",
       "type": "choice",
       "default": "off",
       "options": [
         [
           "off",
-          "Off (whole-bus writes are always read back, in the background)"
+          "Off (every module answers for its own write)"
         ],
         [
           "on",

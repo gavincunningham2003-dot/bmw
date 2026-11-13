@@ -1,4 +1,4 @@
-# UNVERIFIED.md: what 0.5.1 has NOT been seen doing on the car
+# UNVERIFIED.md: what 0.5.1 to 0.5.3 have NOT been seen doing on the car
 
 Everything in 0.5.1 passes on the laptop: the simulated body controller, the kit's real runtime, the emulator.
 **None of 0.5.0 or 0.5.1 has run on the G20.** The head unit's apps do not start until its coding is restored
@@ -10,7 +10,26 @@ What the car HAS confirmed (PROTOCOL_FINDINGS.md, laptop over ENET, 2026-11-04 a
 frame, the 19 modules and their locations on two buses, the read-back, and the whole-bus write (NAD 0) reaching
 12 of 12 on bus 2 and 6 of 7, then 7 of 7, on bus 1.
 
-## New in 0.5.1 (check these first, parked)
+## New in 0.5.3 (check these first, parked)
+
+ a. **Still colours one module at a time, from inside the head unit.** 19 writes for a first Single or Dual
+   colour instead of 2. The write itself is the one verified over ENET; how long 19 of them take through the
+   head unit's gateway (the kit reports about 200 ms a write, so several seconds for the first Apply and for
+   each keep-alive round) is not measured. If the cabin fills in visibly module by module, or the 10 s
+   Keep-alive cannot be met, say so: Diagnostics shows the time per write.
+ b. **From an animation to a still colour and back.** In simulation the frame loop is gone before the first
+   targeted write. On the car, watch for a flicker or a module left on the animation's last colour.
+ c. **Only changed modules written.** Changing one Dual colour should leave the other group visibly untouched.
+   If a module ever shows a stale colour after an Apply that "sent nothing", the read-back setting finds it.
+ d. **The car's own colour as a mode's colour.** With nothing applied the modes take what the body controller
+   reported at the probe. Whether those bytes look like the factory colour when written back (the factory
+   lighting may scale them) has not been seen.
+ e. **A door.** One release to that door's line, as before; now also when its line is the only light of ours
+   on that bus. Item A of 0.5.1 still stands.
+ f. **The preview's pace.** It follows the mode's clock; the car follows the link. On a slow link the picture
+   is smoother than the cabin (same phase, more frames).
+
+## New in 0.5.1 (parked)
 
 A. **BMW's own light on an open door's line.** The app hands that door's contour-line module back with the
    factory handback and writes nothing to it while the door is open. What the car then shows on it (its red
