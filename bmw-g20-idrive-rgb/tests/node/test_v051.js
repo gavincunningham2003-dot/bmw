@@ -219,21 +219,21 @@ test('Rainbow, Fade and Wave are TWO writes a frame (one NAD 0 write a bus); the
         await c.restoreOem();
     }
 });
-test('Breathing and a still dual colour: the majority colour to the whole bus, then single writes only for the lights that differ', async () => {
+test('Breathing: the majority colour to the whole bus, then single writes for the lights that differ; a still dual colour: one targeted write per module', async () => {
     // bus 1: 5 lower lights, 2 upper (the two door lines); bus 2: 7 lower, 5 upper (3 dash lines, 2 door lines)
     const { c, clock, bdc } = make();
     await c.connect();
     const r = await c.apply(DUAL);
     assert.strictEqual(r.written, 19);
-    assert.deepStrictEqual(writes(bdc).map(keyOf), ['1:0', '1:3', '1:6', '2:0', '2:1', '2:2', '2:3', '2:8', '2:11'], '9 writes instead of 19: the bus, then its upper lights front to back');
-    assert.deepStrictEqual(writes(bdc)[0].data.slice(4, 8), [30, 5, 90, 250], 'the whole bus gets the lower colour (most of its lights)');
-    assert.deepStrictEqual(writes(bdc)[1].data.slice(4, 8), [70, 200, 10, 40], 'the exceptions get the upper one');
+    assert.strictEqual(writes(bdc).length, 19, 'a still colour: every module at its own address');
+    assert.ok(writes(bdc).every((x) => x.data[2] !== 0), 'and never NAD 0');
     MODULES.forEach((m) => { const up = S.groupOf(m, 'bottom') === 'top'; assert.deepStrictEqual(phys(c, S.key(m)).slice(0, 4), up ? [200, 10, 40, 70] : [5, 90, 250, 30], S.key(m)); });
-    // one module's colour changes: one write, not the bus
+    // one module's colour changes: one write
     const n = writes(bdc).length;
     await c.apply({ mode: 'zones', handlesTo: 'bottom', assignments: [{ zone: 'lower', colour: BOTTOM.colour, brightness: 30 }, { zone: 'upper', colour: TOP.colour, brightness: 70 }, { zone: 'module:2:4', colour: { r: 9, g: 9, b: 9 }, brightness: 10 }] });
-    assert.deepStrictEqual(PL.plan(c.scene, c.slaves, c.scheduler.last, { mode: 'broadcast', params: (t) => c._params(t) }), [], 'nothing left to write');
-    assert.ok(writes(bdc).slice(n).some((x) => keyOf(x) === '2:4' && x.data[4] === 10));
+    assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['2:4'], 'only the module whose colour changed');
+    assert.strictEqual(writes(bdc)[n].data[4], 10);
+    await clock.advance(0);
     await c.restoreOem();
     // breathing: the same shape every frame
     const b = make();
@@ -311,7 +311,7 @@ test('a moving scene holds 5 s and is renewed after 3 (the reference\'s figures)
     await c.restoreOem();
 });
 test('Apply never waits for the read-back: it answers when the writes are out; the check runs 1.5 s later and a new Apply cancels it', async () => {
-    const { c, clock, bdc } = make();
+    const { c, clock, bdc } = make({}, { verify: true });       // (a still colour is read back when the setting asks for it)
     await c.connect();
     const before = reads(bdc).length;
     const checks = [];
@@ -334,7 +334,7 @@ test('Apply never waits for the read-back: it answers when the writes are out; t
     await c.restoreOem();
 });
 test('writes wait while a read-back has the link, and go out after it (the gateway takes one request at a time)', async () => {
-    const { c, clock, bdc } = make();
+    const { c, clock, bdc } = make({}, { verify: true });
     await c.connect();
     await c.apply(BLUE);
     let release = null;
@@ -495,10 +495,10 @@ test('the factory ambient lighting switched off: two releases at once, one read-
 test('a module that missed the whole-bus release is found by that read-back and released on its own', async () => {
     const { c, clock, bdc } = make({ deafKeys: ['2:5'] });
     await c.connect();
-    await c.apply(BLUE);                                       // (2:5 ignores NAD 0: the first read-back repairs the colour)
+    await c.apply(BLUE);                                       // (2:5 ignores NAD 0; a still colour is written to it directly)
     await clock.advance(4000);
-    assert.deepStrictEqual(Array.from(c.deaf), ['2:5']);
-    c.deaf.clear();                                            // as if it had only missed the release
+    assert.deepStrictEqual(Array.from(c.deaf), []);
+    assert.deepStrictEqual(phys(c, '2:5'), [0, 0, 254, 100, 'custom']);
     const n = writes(bdc).length;
     const r = await c.restoreOem();
     assert.strictEqual(r.ok, true);
@@ -508,6 +508,7 @@ test('a module that missed the whole-bus release is found by that read-back and 
     assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['1:0', '2:0', '2:5'], 'released singly after the read-back');
     assert.strictEqual(phys(c, '2:5')[4], 'oem');
     assert.strictEqual(c.stats.releaseRepairs, 1);
+    assert.deepStrictEqual(Array.from(c.deaf), ['2:5'], 'remembered: an animation will write it on its own');
     await clock.advance(60000);
     assert.strictEqual(writes(bdc).length, n + 3);
     assert.strictEqual(clock.pending(), 0);
@@ -583,7 +584,12 @@ test('a car that refuses NAD 0: the handback falls back to one release a module,
     await c.connect();
     await c.apply(BLUE);
     await c.scheduler.drain();
+    assert.strictEqual(c.broadcastOk, true, 'a still colour never asked for NAD 0');
+    const first = await c.restoreOem();                        // the first handback meets the refusal and falls back at once
+    assert.deepStrictEqual([first.ok, first.released], [true, 19]);
     assert.strictEqual(c.broadcastOk, false);
+    await c.apply(BLUE);
+    await c.scheduler.drain();
     const n = writes(bdc).length;
     const r = await c.restoreOem();
     assert.deepStrictEqual([r.ok, r.released], [true, 19]);
@@ -594,8 +600,8 @@ test('a car that refuses NAD 0: the handback falls back to one release a module,
 /* ================= 7. the settings, the screen ================= */
 test('settings: whole-bus writes and the door handback are on from the start; no red-door setting; the version', () => {
     const def = (k) => SPEC.settings.find((s) => s.key === k);
-    assert.strictEqual(SPEC.version, '0.5.2');
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.5.2');
+    assert.strictEqual(SPEC.version, '0.5.3');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.5.3');
     // the app's own icon (0.5.2): a PNG of the size the kit's icons have, small enough for MGU Store to show (128 KiB)
     const icon = fs.readFileSync(path.join(APP, 'icon.png'));
     assert.deepStrictEqual(Array.from(icon.slice(0, 8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);

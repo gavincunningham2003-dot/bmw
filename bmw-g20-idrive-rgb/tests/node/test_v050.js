@@ -481,7 +481,7 @@ test('each door: ONE release to its own contour line, nothing else touched, noth
         assert.ok(during.length > 18, door + ': the others are kept alive');
         assert.ok(during.every((r) => keyOf(r) !== LINE[door]), door + ': not one write to the open door\'s line');
         assert.ok(during.every((r) => keyOf(r) !== bus + ':0'), door + ': no whole-bus write on its bus');
-        assert.ok(during.some((r) => keyOf(r) === (bus === '1' ? '2' : '1') + ':0'), door + ': the other bus is still written whole');
+        assert.ok(during.every((r) => r.data[2] !== 0), door + ': a still colour is kept alive with targeted writes on both buses');
         assert.ok(writes(bdc).slice(n).every((r) => !isRed(r) && !isBlack(r)), door + ': no red and no black from the app');
         assert.strictEqual(phys(svc, LINE[door])[4], 'oem');
         svc.ctl.slaves.filter((s) => S.key(s) !== LINE[door]).forEach((s) => assert.strictEqual(phys(svc, S.key(s))[4], 'custom', door + ': ' + S.key(s) + ' never lapsed'));
@@ -494,7 +494,7 @@ test('each door: ONE release to its own contour line, nothing else touched, noth
         assert.strictEqual(svc.ctl.program.mode, 'solid');
         const k = writes(bdc).length;
         await clock.advance(12000);
-        assert.ok(writes(bdc).slice(k).some((r) => keyOf(r) === bus + ':0'), door + ': its bus is written whole again');
+        assert.ok(writes(bdc).slice(k).some((r) => keyOf(r) === LINE[door]), door + ': its line is kept alive again with the others');
     }
 });
 test('several doors open at once: each line released on its own; one closing leaves the others with BMW', async () => {
@@ -840,11 +840,12 @@ test('a whole-bus write without a reply: not repeated as 12 single writes, whole
     await c.connect();
     const real = c._writeSlave.bind(c);
     c._writeSlave = async (slave, params) => { const r = await real(slave, params); return slave.bus === 2 && slave.nad === 0 ? { ok: false, reason: 'timeout' } : r; };
-    const r = await c.apply(BLUE);
+    const r = await c.apply({ mode: 'rainbow' });
     assert.deepStrictEqual([r.ok, r.written, r.unanswered], [true, 7, 12]);
     assert.strictEqual(writes(bdc).length, 2, 'two whole-bus writes and nothing more');
     assert.strictEqual(c.broadcastOk, true);
     assert.strictEqual(c.driven.size, 19);
+    c._stopTicker();
 });
 test('three writes in a row without a reply: custom control stops and says so (the lights lapse by themselves)', async () => {
     const clock = fakeClock(), bdc = new MockBdc({ now: clock.now });
@@ -863,24 +864,32 @@ test('three writes in a row without a reply: custom control stops and says so (t
     assert.strictEqual(bdc.requests.length - n, 3, 'and then silence');
     assert.strictEqual(clock.pending(), 0);
 });
-test('whole-bus mode is preferred for a uniform colour, never used for a bus with a module left to BMW, and repairs a miss by read-back', async () => {
-    const clock = fakeClock(), bdc = new MockBdc({ now: clock.now, deafKeys: ['1:1'] });
-    const c = new MockLightingController({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient', txMode: 'broadcast' });
+test('a still colour is targeted and never whole-bus; an animation in a zone never uses NAD 0 on a bus with a module left to BMW; the read-back (setting on) repairs a miss', async () => {
+    const clock = fakeClock(), bdc = new MockBdc({ now: clock.now });
+    const c = new MockLightingController({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient', txMode: 'broadcast', verify: true });
     await c.connect();
     const checks = [];
     c.on('verified', (v) => checks.push([v.confirmed, v.missed]));
+    // one module does not take its write although the body controller says yes (what a read-back is for)
+    const real = c._writeSlave.bind(c);
+    let drop = true;
+    c._writeSlave = async (slave, params) => { if (drop && slave.bus === 1 && slave.nad === 1) { drop = false; return { ok: true }; } return real(slave, params); };
     const r = await c.apply(BLUE);
-    assert.deepStrictEqual(writes(bdc).map(keyOf), ['1:0', '2:0'], 'the colour is on after two writes, and Apply has answered');
-    assert.strictEqual(r.verifying, true);
+    assert.strictEqual(writes(bdc).length, 18, 'one write per module (the dropped one never reached the car)');
+    assert.ok(writes(bdc).every((x) => x.data[2] !== 0), 'none to NAD 0');
+    assert.strictEqual(r.verifying, true, 'the setting asks for the read-back');
     await clock.advance(1600);
     assert.deepStrictEqual(checks[0], [18, 1]);
-    assert.deepStrictEqual(writes(bdc).slice(2).map(keyOf), ['1:1'], 'the read-back found the one that missed it: one single write');
-    assert.deepStrictEqual(Array.from(c.deaf), ['1:1']);
+    assert.deepStrictEqual(writes(bdc).slice(18).map(keyOf), ['1:1'], 'the read-back found the one that missed it: one single write');
+    assert.deepStrictEqual(Array.from(c.deaf), [], 'a missed targeted write says nothing about NAD 0');
     await c.restoreOem();
     const n = writes(bdc).length;
-    await c.apply(FOOT);                                       // footwells only: the rest stays BMW's
+    await c.apply({ mode: 'rainbow', zone: 'footwells' });      // footwells only: the rest stays BMW's
+    await clock.advance(4000);
+    assert.ok(writes(bdc).length > n);
     assert.ok(writes(bdc).slice(n).every((x) => x.data[2] !== 0), 'no NAD 0 while BMW keeps modules on those buses');
     assert.strictEqual(c.physicalColour('2:1').source, 'oem');
+    await c.restoreOem();
 });
 test('the real transport path: one request in flight, the kit\'s own busy retries switched off, a refused transport reported as busy', async () => {
     const mock = new MockBdc({});

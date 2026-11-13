@@ -136,7 +136,10 @@ function carView(cv, t, x, y, w, h, slaves, scene, opts) {
     // the modules
     const oem = o.oemColour || withAlpha('#9fb4ff', 0.30);
     // the colour stays vivid; the brightness sets how strongly it glows
-    const colourOf = (m) => { const s = scene && scene[S.key(m)]; if (!s) return { c: oem, on: false, k: 0 }; const k = Math.max(0.1, (s.brightness == null ? 100 : s.brightness) / 100); return { c: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), 0.55 + 0.45 * k), g: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), 0.1 + 0.25 * k), on: true, k }; };
+    // (o.deep, the Modes page's moving preview: the brightness goes all the way down to dark, so a breath, a sweep
+    // and a pulse are seen as they are; without it a dim colour stays readable as a colour)
+    const lo = o.deep ? 0.08 : 0.55, glo = o.deep ? 0.02 : 0.1, kMin = o.deep ? 0 : 0.1;
+    const colourOf = (m) => { const s = scene && scene[S.key(m)]; if (!s) return { c: oem, on: false, k: 0 }; const k = Math.max(kMin, (s.brightness == null ? 100 : s.brightness) / 100); return { c: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), lo + (1 - lo) * k), g: withAlpha(C.rgbToHex(C.rgb(s.r, s.g, s.b)), glo + (0.35 - glo) * k), on: true, k }; };
     const glowLine = (xa, ya, xb, yb, m, wd) => { const { c, g, on } = colourOf(m); if (on) cv.line(xa, ya, xb, yb, (wd || 5) * 2.6, g); cv.line(xa, ya, xb, yb, on ? (wd || 5) : 3, c); };
     // a door line: an arc bulging with the body's side, from y0 to y1 on side right/left
     const doorArc = (right, y0, y1, m, inset) => {

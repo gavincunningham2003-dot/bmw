@@ -94,6 +94,8 @@ test('Dual Colour: two drafts, swap and copy, Apply both drives upper and lower 
     h.tap(210, 155);                                              // upper hue ring (centre 210, 282; band 104..150): its top = hue 0, red
     h.tap(750, 155);                                              // lower hue ring: hue 0 too
     d.bottom.hsv = { h: 200, s: 0.65, v: 1 };
+    assert.deepStrictEqual([d.top.brightness, d.bottom.brightness], [100, 100], 'both selectors open at 100 %');
+    d.bottom.brightness = 45;
     assert.strictEqual(h.app.ctl().program, null, 'preview only');
     await h.frame();
     await h.press('swap');
@@ -133,15 +135,15 @@ test('Modes: pick Rainbow, adjust its speed with the stepper, Start it; then Bre
     assert.strictEqual(h.app.draft.modes.params.rainbow.speed, 3, 'fast is the end');
     await h.frame();
     await h.press('usedual');
-    assert.deepStrictEqual(h.app.draft.modes.params.rainbow.top, { colour: C.hsvToRgb(270, 1, 1), brightness: 80 }, 'the Dual page\'s upper colour and brightness');
-    assert.strictEqual(h.app.draft.modes.params.rainbow.bottom.brightness, 45);
+    assert.deepStrictEqual(h.app.draft.modes.params.rainbow.top, { colour: C.hsvToRgb(270, 1, 1), brightness: 100 }, 'the Dual page\'s upper colour and brightness');
+    assert.strictEqual(h.app.draft.modes.params.rainbow.bottom.brightness, 100);
     assert.strictEqual(h.app.ctl().program, null, 'preview only');
     await h.press('apply');
     await sleep(60);
     const ctl = h.app.ctl();
     assert.strictEqual(ctl.program.mode, 'rainbow');
     assert.strictEqual(ctl.program.speed, 3);
-    assert.strictEqual(ctl.program.top.brightness, 80);
+    assert.strictEqual(ctl.program.top.brightness, 100);
     await sleep(300);
     assert.ok(ctl.stats.frames >= 2, 'animating: ' + ctl.stats.frames);
     await h.frame();
@@ -264,7 +266,7 @@ test('APPLY AT START: with the setting on, the last applied lighting comes back;
     await sleep(200);
     assert.ok(h.app.ctl().program && h.app.ctl().program.mode === 'solid', 'applied at start');
     assert.strictEqual(C.rgbToHex(h.app.ctl().program.colour), '#10FE32');
-    assert.ok(h.app.ctl().scheduler.stats.writes >= 2, 'written at start (two whole-bus writes)');
+    assert.ok(h.app.ctl().scheduler.stats.writes >= 2, 'written at start (one targeted write per module)');
     assert.ok(h.app.ctl().slaves.every((s) => { const p = h.app.ctl().physicalColour(s.bus + ':' + s.nad); return p.source === 'custom' && p.r === 0x10 && p.g === 0xFE && p.b === 0x32; }), 'all 19 modules show it');
     // Restore OEM is the off switch: the next start stays factory
     await h.frame();

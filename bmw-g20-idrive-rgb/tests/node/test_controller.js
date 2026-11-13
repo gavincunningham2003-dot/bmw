@@ -77,7 +77,7 @@ test('changing one zone keeps the others: a zones program', async () => {
     await c.apply({ mode: 'zones', assignments: [{ zone: 'all', colour: { r: 1, g: 1, b: 1 }, brightness: 50 }, { zone: 'footwells', colour: { r: 9, g: 9, b: 9 }, brightness: 20 }] });
     assert.deepStrictEqual(phys(c, '2:4'), [9, 9, 9, 20, 'custom']);
     assert.deepStrictEqual(phys(c, '2:1'), [1, 1, 1, 50, 'custom']);
-    assert.strictEqual(writes(c).length, 19 + 19, 'the second apply forced a full round (apply always refreshes)');
+    assert.strictEqual(writes(c).length, 19 + 4, 'the second apply wrote the four footwells and left the 15 unchanged modules alone');
 });
 test('restoreOem hands the whole cabin back in TWO writes (NAD 0, ZUSTAND 0, one a bus) and reports exactly what happened', async () => {
     const { c, clock } = make();

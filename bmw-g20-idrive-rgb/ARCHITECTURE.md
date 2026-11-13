@@ -203,6 +203,25 @@ changes while driving* can relax this. The simulated link is exempt.
 
 What was copied, adapted and left: [THIRD_PARTY.md](THIRD_PARTY.md).
 
+## 3d. 0.5.3: two write methods, one writer; active colours; the preview
+
+```
+ apply(program)                 stops the other method first (ticker + queued frames, or the keep-alive)
+   still: solid / dual / zones  _writeTargeted()  one write per module, own NAD, only where the colour changes
+                                keep-alive timer  targeted renewals                         writer() = 'targeted'
+   animated: rainbow ... pulse  _writeWholeBus()  NAD 0 + exceptions, frame by frame (3c)   writer() = 'bus'
+                         both -> lighting_scheduler (one request at a time)
+ restoreOem()                   one NAD 0 release a bus (both methods)
+ a door / a module left to BMW  one release per module, never NAD 0
+
+ active_colours.activeLook()    applied program -> else the modules as last read (liveColours(): only a read
+                                newer than our last write) -> else the last applied.   Never a draft.
+ main.js syncModes()            Modes page opened / a mode picked / an Apply: modes without colours of their
+                                own take the active look
+ lighting_preview.ModePreview   draft program -> lighting_scene.render at the preview's clock -> carView
+                                (requires lighting_scene only; no controller, no timer)
+```
+
 ## 4. The control paths, as ranked by the brief
 
 | # | Approach | Status |

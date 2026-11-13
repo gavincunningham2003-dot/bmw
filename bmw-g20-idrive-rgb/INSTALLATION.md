@@ -98,7 +98,8 @@ The app starts with **Lighting link = Simulated BDC** and **Write to the car = D
 
 Everything new in 0.4.0 is off or on its safe value after an install. Switch things on one at a time, parked:
 
-1. **First use as in part E.** From 0.5.1 *Writes to the car* starts on *Whole bus where it saves writes*
+1. **First use as in part E.** (0.5.3: the setting is now *How animations are written*; still colours are
+   always written one module at a time.) From 0.5.1 *Writes to the car* starts on *Whole bus where it saves writes*
    (seen on this car from the laptop on 2026-11-12); *One per module* is the setting to fall back on.
 2. **The whole-bus write**, from the laptop if you want to see it first: `python write_test.py --gateway <ip> broadcast --bus 1 --rgb 00FE00`
    and the same with `--bus 2`. In the app the Diagnostics page counts the whole-bus writes and lists a
