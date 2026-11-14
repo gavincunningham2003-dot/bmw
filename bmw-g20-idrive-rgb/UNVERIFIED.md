@@ -1,4 +1,4 @@
-# UNVERIFIED.md: what 0.5.1 to 0.5.3 have NOT been seen doing on the car
+# UNVERIFIED.md: what 0.6.0 has NOT been seen doing on the car
 
 Everything in 0.5.1 passes on the laptop: the simulated body controller, the kit's real runtime, the emulator.
 **None of 0.5.0 or 0.5.1 has run on the G20.** The head unit's apps do not start until its coding is restored
@@ -10,26 +10,25 @@ What the car HAS confirmed (PROTOCOL_FINDINGS.md, laptop over ENET, 2026-11-04 a
 frame, the 19 modules and their locations on two buses, the read-back, and the whole-bus write (NAD 0) reaching
 12 of 12 on bus 2 and 6 of 7, then 7 of 7, on bus 1.
 
-## New in 0.5.3 (check these first, parked)
+## New in 0.6.0 (check these first, parked)
 
- a. **Still colours one module at a time, from inside the head unit.** 19 writes for a first Single or Dual
-   colour instead of 2. The write itself is the one verified over ENET; how long 19 of them take through the
-   head unit's gateway (the kit reports about 200 ms a write, so several seconds for the first Apply and for
-   each keep-alive round) is not measured. If the cabin fills in visibly module by module, or the 10 s
-   Keep-alive cannot be met, say so: Diagnostics shows the time per write.
- b. **From an animation to a still colour and back.** In simulation the frame loop is gone before the first
-   targeted write. On the car, watch for a flicker or a module left on the animation's last colour.
- c. **Only changed modules written.** Changing one Dual colour should leave the other group visibly untouched.
-   If a module ever shows a stale colour after an Apply that "sent nothing", the read-back setting finds it.
- d. **The car's own colour as a mode's colour.** With nothing applied the modes take what the body controller
-   reported at the probe. Whether those bytes look like the factory colour when written back (the factory
-   lighting may scale them) has not been seen.
- e. **A door.** One release to that door's line, as before; now also when its line is the only light of ours
-   on that bus. Item A of 0.5.1 still stands.
- f. **The preview's pace.** It follows the mode's clock; the car follows the link. On a slow link the picture
-   is smoother than the cabin (same phase, more frames).
+0.6.0 is 0.5.1's lighting code with four changes; none of them has run on the car.
 
-## New in 0.5.1 (parked)
+a. **Still colours written one a module** (the new default for Solid / Dual): 19 writes for an Apply and for each
+   round of keep-alives, where 0.5.1 used 2. Not seen: how long 19 writes take through the head unit's diagnostic
+   link, and whether the keep-alive round always finishes inside the hold time. If it does not, set "Solid / Dual
+   colours: writes to the car" to whole bus.
+b. **Lighting that stays on with the screen closed.** With no vehicle-state signal (it is optional), nothing in the
+   app now stops applied lighting by time. Not seen on the car: whether VehicleCondition arrives, and whether the
+   head unit stops the app soon enough after the car is locked for the body controller to go to sleep. If the
+   lights stay on in a locked car, set "Car state unknown, app not on screen" to stop after 15 minutes and report
+   it: an awake body controller drains the battery.
+c. **A door during a mode**: the door's line stays in the animation, so BMW's red door warning is not shown on it
+   while a mode runs. That is as asked; the open question is only whether the car itself overrides the line.
+d. **A door over a still colour**: one release to that module (unchanged from 0.5.1 apart from never being a
+   whole-bus release); still not seen on the car.
+
+## New in 0.5.1 (also still open)
 
 A. **BMW's own light on an open door's line.** The app hands that door's contour-line module back with the
    factory handback and writes nothing to it while the door is open. What the car then shows on it (its red

@@ -43,7 +43,7 @@ const phys = (c, key) => { const p = c.physicalColour(key); return [p.r, p.g, p.
 function make(mock, opts) {
     const clock = fakeClock();
     const bdc = new MockBdc(Object.assign({ now: clock.now }, mock || {}));
-    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient', txMode: 'broadcast' }, opts || {}));
+    const c = new MockLightingController(Object.assign({ bdc, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, refreshSeconds: 10, parkedPolicy: 'lenient', txMode: 'broadcast', txStill: 'broadcast' }, opts || {}));
     return { c, bdc, clock };
 }
 /** Every write the controller hands to its transport, with the moment it was handed over. */
@@ -219,21 +219,21 @@ test('Rainbow, Fade and Wave are TWO writes a frame (one NAD 0 write a bus); the
         await c.restoreOem();
     }
 });
-test('Breathing: the majority colour to the whole bus, then single writes for the lights that differ; a still dual colour: one targeted write per module', async () => {
+test('Breathing and a still dual colour: the majority colour to the whole bus, then single writes only for the lights that differ', async () => {
     // bus 1: 5 lower lights, 2 upper (the two door lines); bus 2: 7 lower, 5 upper (3 dash lines, 2 door lines)
     const { c, clock, bdc } = make();
     await c.connect();
     const r = await c.apply(DUAL);
     assert.strictEqual(r.written, 19);
-    assert.strictEqual(writes(bdc).length, 19, 'a still colour: every module at its own address');
-    assert.ok(writes(bdc).every((x) => x.data[2] !== 0), 'and never NAD 0');
+    assert.deepStrictEqual(writes(bdc).map(keyOf), ['1:0', '1:3', '1:6', '2:0', '2:1', '2:2', '2:3', '2:8', '2:11'], '9 writes instead of 19: the bus, then its upper lights front to back');
+    assert.deepStrictEqual(writes(bdc)[0].data.slice(4, 8), [30, 5, 90, 250], 'the whole bus gets the lower colour (most of its lights)');
+    assert.deepStrictEqual(writes(bdc)[1].data.slice(4, 8), [70, 200, 10, 40], 'the exceptions get the upper one');
     MODULES.forEach((m) => { const up = S.groupOf(m, 'bottom') === 'top'; assert.deepStrictEqual(phys(c, S.key(m)).slice(0, 4), up ? [200, 10, 40, 70] : [5, 90, 250, 30], S.key(m)); });
-    // one module's colour changes: one write
+    // one module's colour changes: one write, not the bus
     const n = writes(bdc).length;
     await c.apply({ mode: 'zones', handlesTo: 'bottom', assignments: [{ zone: 'lower', colour: BOTTOM.colour, brightness: 30 }, { zone: 'upper', colour: TOP.colour, brightness: 70 }, { zone: 'module:2:4', colour: { r: 9, g: 9, b: 9 }, brightness: 10 }] });
-    assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['2:4'], 'only the module whose colour changed');
-    assert.strictEqual(writes(bdc)[n].data[4], 10);
-    await clock.advance(0);
+    assert.deepStrictEqual(PL.plan(c.scene, c.slaves, c.scheduler.last, { mode: 'broadcast', params: (t) => c._params(t) }), [], 'nothing left to write');
+    assert.ok(writes(bdc).slice(n).some((x) => keyOf(x) === '2:4' && x.data[4] === 10));
     await c.restoreOem();
     // breathing: the same shape every frame
     const b = make();
@@ -311,7 +311,7 @@ test('a moving scene holds 5 s and is renewed after 3 (the reference\'s figures)
     await c.restoreOem();
 });
 test('Apply never waits for the read-back: it answers when the writes are out; the check runs 1.5 s later and a new Apply cancels it', async () => {
-    const { c, clock, bdc } = make({}, { verify: true });       // (a still colour is read back when the setting asks for it)
+    const { c, clock, bdc } = make();
     await c.connect();
     const before = reads(bdc).length;
     const checks = [];
@@ -334,7 +334,7 @@ test('Apply never waits for the read-back: it answers when the writes are out; t
     await c.restoreOem();
 });
 test('writes wait while a read-back has the link, and go out after it (the gateway takes one request at a time)', async () => {
-    const { c, clock, bdc } = make({}, { verify: true });
+    const { c, clock, bdc } = make();
     await c.connect();
     await c.apply(BLUE);
     let release = null;
@@ -355,82 +355,137 @@ test('writes wait while a read-back has the link, and go out after it (the gatew
     await c.restoreOem();
 });
 
-/* ================= 5. a door during Rainbow and during Colour Wave ================= */
+/* ================= 5. doors (0.6.0): handed back over a STILL colour only, one module, never the bus ================= */
+const DOOR_FIELD = { driverFront: 'statusDoorSwitchDRD', passengerFront: 'statusDoorSwitchPSD', driverRear: 'statusDoorSwitchDRDR', passengerRear: 'statusDoorSwitchPSDR' };
 for (const mode of ['rainbow', 'wave']) {
-    test('a door opening and closing during ' + S.MODE_LABELS[mode] + ': its line goes to BMW with one release, the animation runs on around it, and it rejoins at the current phase', async () => {
+    test('a door opening and closing during ' + S.MODE_LABELS[mode] + ': nothing is released, its line stays in the animation and its bus is still written whole', async () => {
         for (const door of Object.keys(LINE)) {
             const { svc, clock, bdc, car } = await makeService({});
-            const field = { driverFront: 'statusDoorSwitchDRD', passengerFront: 'statusDoorSwitchPSD', driverRear: 'statusDoorSwitchDRDR', passengerRear: 'statusDoorSwitchPSDR' }[door];
             const what = mode + ', ' + door + ': ';
             assert.ok((await svc.apply(program(mode))).ok);
             await clock.advance(3000);
-            const ctl = svc.ctl, phase0 = ctl.phase0, prog = ctl.program, applies = ctl.stats.applies;
-            const bus = Number(LINE[door].split(':')[0]), other = bus === 1 ? 2 : 1;
+            const ctl = svc.ctl, phase0 = ctl.phase0, prog = ctl.program, applies = ctl.stats.applies, bus = LINE[door].split(':')[0];
             const n = writes(bdc).length;
-            car.doors({ [field]: 1 });
-            await tick(); await clock.advance(1000);
+            car.doors({ [DOOR_FIELD[door]]: 1 });
+            await tick(); await clock.advance(2000);
             const open = writes(bdc).slice(n);
-            const toLine = open.filter((r) => keyOf(r) === LINE[door]);
-            assert.strictEqual(toLine.length, 1, what + 'one write to the door\'s line');
-            assert.ok(isRelease(toLine[0]), what + 'and it is the factory handback');
-            assert.strictEqual(svc.ctl.physicalColour(LINE[door]).source, 'oem', what + 'BMW has the line');
-            assert.ok(open.every((r) => keyOf(r) !== bus + ':0'), what + 'no whole-bus write on the door\'s bus while it is open');
-            assert.ok(open.filter((r) => keyOf(r) === other + ':0').length >= 10, what + 'the other bus is still one write a frame');
-            const singles = new Set(open.filter((r) => r.data[3] === 1 && keyOf(r).split(':')[0] === String(bus)).map(keyOf));
-            assert.strictEqual(singles.size, MODULES.filter((m) => m.bus === bus).length - 1, what + 'every other light of that bus is written on its own');
-            assert.ok(open.every((r) => r.data[3] === 0 || !(r.data[4] === 0)), what + 'no black');
-            // two more seconds open: the animation is alive on every other light, the line untouched
-            const before = MODULES.filter((m) => S.key(m) !== LINE[door]).map((m) => svc.ctl.physicalColour(S.key(m)));
-            const m0 = writes(bdc).length;
-            await clock.advance(2000);
-            assert.ok(writes(bdc).slice(m0).every((r) => keyOf(r) !== LINE[door] && keyOf(r) !== bus + ':0'), what + 'still not one write to it');
-            const after = MODULES.filter((m) => S.key(m) !== LINE[door]).map((m) => svc.ctl.physicalColour(S.key(m)));
-            assert.ok(after.every((p) => p.source === 'custom'), what + 'nothing else lapsed');
-            assert.notDeepStrictEqual(after, before, what + 'the animation moved on');
-            assert.strictEqual(svc.ctl.physicalColour(LINE[door]).source, 'oem');
-            // the door closes
-            const log = tap(ctl, clock);
+            assert.ok(open.length > 10, what + 'the animation goes on');
+            assert.ok(open.every((r) => !isRelease(r)), what + 'not one release while a mode runs');
+            assert.ok(open.some((r) => keyOf(r) === bus + ':0'), what + 'the door\'s bus is still written whole');
+            assert.strictEqual(ctl.physicalColour(LINE[door]).source, 'custom', what + 'the line keeps the animation');
+            assert.ok(ctl.driven.has(LINE[door]) && ctl.scene[LINE[door]], what + 'and stays in the scene');
+            assert.deepStrictEqual(ctl.status().released, [], what + 'nothing is listed as handed back');
             car.doors({});
-            await tick(); await clock.advance(400);
+            await tick(); await clock.advance(1000);
+            assert.ok(writes(bdc).slice(n).every((r) => !isRelease(r)), what + 'closing releases nothing either');
             assert.strictEqual(ctl.phase0, phase0, what + 'the animation\'s time origin was never touched');
             assert.strictEqual(ctl.program, prog);
             assert.strictEqual(ctl.stats.applies, applies, what + 'nothing was applied again');
-            // the line shows what lightAt() says for the frame just written: the same phase as its neighbours
-            const last = log.filter((e) => e.params.active).pop();
-            const m = MODULES.find((x) => S.key(x) === LINE[door]);
-            const want = AC.lightAt(refScene(mode), refLight(m), last.t - phase0);
-            assert.deepStrictEqual(phys(ctl, LINE[door]), [cap(want.rgb[0]), cap(want.rgb[1]), cap(want.rgb[2]), want.bright, 'custom'], what + 'back at the current phase');
-            const mate = MODULES.find((x) => x.bus === bus && S.key(x) !== LINE[door]);
-            assert.deepStrictEqual(phys(ctl, LINE[door]).slice(0, 3), phys(ctl, S.key(mate)).slice(0, 3), what + 'in step with the rest of its bus');
-            assert.ok(log.some((e) => e.key === bus + ':0' && e.params.active), what + 'its bus is written whole again');
             await svc.stop();
         }
     });
 }
-test('two doors on different buses during Rainbow: both buses go to single writes, both lines stay BMW\'s; a release nobody answers is not sent again', async () => {
-    const { svc, clock, bdc, car } = await makeService({});
-    await svc.apply(program('rainbow'));
-    await clock.advance(1000);
+test('a door over a still colour, with either write setting: ONE release to that door\'s line and never NAD 0; a mode started with the door open takes the line, the still colour after it releases it again', async () => {
+    for (const txModeStill of ['individual', 'broadcast']) for (const door of Object.keys(LINE)) {
+        const { svc, clock, bdc, car } = await makeService({ sets: { txModeStill } });
+        const what = txModeStill + ', ' + door + ': ';
+        assert.ok((await svc.apply(BLUE)).ok);
+        await clock.advance(2000);
+        let n = writes(bdc).length;
+        car.doors({ [DOOR_FIELD[door]]: 1 });
+        await tick(); await svc.ctl.scheduler.drain();
+        const w = writes(bdc).slice(n);
+        assert.deepStrictEqual(w.map(keyOf), [LINE[door]], what + 'one write, to that door\'s line only');
+        assert.ok(isRelease(w[0]), what + 'the factory handback');
+        assert.strictEqual(svc.ctl.physicalColour(LINE[door]).source, 'oem', what + 'BMW has the line');
+        svc.ctl.slaves.filter((m) => S.key(m) !== LINE[door]).forEach((m) => assert.strictEqual(svc.ctl.physicalColour(S.key(m)).source, 'custom', what + S.key(m) + ' keeps its colour'));
+        // a mode with the door still open: the line is the animation's
+        n = writes(bdc).length;
+        assert.ok((await svc.apply(program('rainbow'))).ok);
+        await clock.advance(1000);
+        assert.strictEqual(svc.ctl.physicalColour(LINE[door]).source, 'custom', what + 'the mode has the line');
+        assert.ok(writes(bdc).slice(n).every((r) => !isRelease(r)), what + 'no release in a mode');
+        // the still colour again, the door still open: that one line goes back, with one release of its own
+        n = writes(bdc).length;
+        assert.ok((await svc.apply(BLUE)).ok);
+        await svc.ctl.scheduler.drain();
+        assert.deepStrictEqual(writes(bdc).slice(n).filter(isRelease).map(keyOf), [LINE[door]], what + 'one release, to that line');
+        assert.strictEqual(svc.ctl.physicalColour(LINE[door]).source, 'oem');
+        await svc.stop();
+    }
+});
+test('a partial handback is never a whole-bus release, even when nothing else on that bus is lit; a door\'s release nobody answers is not sent again', async () => {
+    const { c, bdc } = make({}, { txMode: 'broadcast', txStill: 'broadcast' });
+    await c.connect();
+    assert.ok((await c.apply(BLUE)).ok);
     const n = writes(bdc).length;
-    car.doors({ statusDoorSwitchDRD: 1, statusDoorSwitchPSD: 1 });
-    await tick(); await clock.advance(2000);
+    c._release(c.slaves.filter((m) => m.bus === 1), {});
+    await c.scheduler.drain();
     const w = writes(bdc).slice(n);
-    assert.ok(w.every((r) => r.data[2] !== 0), 'no NAD 0 at all');
-    assert.deepStrictEqual(w.filter((r) => keyOf(r) === LINE.driverFront || keyOf(r) === LINE.passengerFront).map(isRelease), [true, true]);
-    assert.strictEqual(svc.ctl.driven.size, 17);
-    await svc.stop();
-    // the release of a door's line gets no reply: sent once, and the frames do not ask again
+    assert.strictEqual(w.length, 7);
+    assert.ok(w.every((r) => isRelease(r) && r.data[2] !== 0), 'seven single releases, no NAD 0');
+    await c.restoreOem();
     const b = await makeService({});
-    await b.svc.apply(program('rainbow'));
-    await b.clock.advance(1000);
+    await b.svc.apply(BLUE);
+    await b.clock.advance(2000);
     const real = b.svc.ctl._writeSlave.bind(b.svc.ctl);
     let lost = 0;
     b.svc.ctl._writeSlave = async (slave, params) => { const r = await real(slave, params); if (!params.active && slave.nad === 8) { lost++; return { ok: false, reason: 'timeout' }; } return r; };
     b.car.doors({ statusDoorSwitchDRD: 1 });
-    await tick(); await b.clock.advance(3000);
+    await tick(); await b.clock.advance(30000);
     assert.strictEqual(lost, 1, 'one release, whatever became of its reply');
-    assert.strictEqual(b.svc.ctl.program.mode, 'rainbow', 'and the animation goes on');
+    assert.strictEqual(b.svc.ctl.program.mode, 'solid', 'and the colour stays on');
     await b.svc.stop();
+});
+
+/* ================= 5b. two write settings (0.6.0): one for the modes, one for the still colours ================= */
+test('modes and still colours each follow their own write setting; the full handback is two whole-bus releases with any of them', async () => {
+    const nad0 = (r) => r.data[2] === 0;
+    // modes: whole bus; still colours: one write a module (the defaults)
+    const a = make({}, { txMode: 'broadcast', txStill: 'individual' });
+    await a.c.connect();
+    assert.ok((await a.c.apply(BLUE)).ok);
+    assert.strictEqual(writes(a.bdc).length, 19, 'a solid colour: one write a module');
+    assert.strictEqual(a.c.status().writeMode, 'individual');
+    await a.clock.advance(12000);
+    assert.ok(writes(a.bdc).every((r) => !nad0(r)), 'and its keep-alives too');
+    assert.ok((await a.c.apply(DUAL)).ok);
+    assert.ok(writes(a.bdc).every((r) => !nad0(r)), 'dual colour: the same');
+    let n = writes(a.bdc).length;
+    assert.ok((await a.c.apply(program('rainbow'))).ok);
+    await a.clock.advance(1000);
+    assert.strictEqual(a.c.status().writeMode, 'broadcast');
+    assert.ok(writes(a.bdc).slice(n).some((r) => nad0(r) && !isRelease(r)), 'the mode goes out a whole bus at a time');
+    n = writes(a.bdc).length;
+    assert.ok((await a.c.restoreOem()).ok);
+    assert.deepStrictEqual(writes(a.bdc).slice(n).filter(isRelease).map(keyOf), ['1:0', '2:0'], 'handed back: one release a bus');
+    // the other way round
+    const b = make({}, { txMode: 'individual', txStill: 'broadcast' });
+    await b.c.connect();
+    assert.ok((await b.c.apply(BLUE)).ok);
+    assert.deepStrictEqual(writes(b.bdc).map(keyOf), ['1:0', '2:0'], 'a solid colour: two whole-bus writes');
+    n = writes(b.bdc).length;
+    assert.ok((await b.c.apply(program('rainbow'))).ok);
+    await b.clock.advance(1000);
+    assert.strictEqual(b.c.status().writeMode, 'individual');
+    assert.ok(writes(b.bdc).slice(n).length > 19 && writes(b.bdc).slice(n).every((r) => !nad0(r)), 'the mode: one write a module');
+    n = writes(b.bdc).length;
+    assert.ok((await b.c.restoreOem()).ok);
+    assert.deepStrictEqual(writes(b.bdc).slice(n).filter(isRelease).map(keyOf), ['1:0', '2:0']);
+});
+test('the two write settings and the idle setting: their defaults, and the service hands both write settings to the controller', async () => {
+    const def = (k) => SPEC.settings.find((x) => x.key === k);
+    assert.deepStrictEqual([def('txMode').default, def('txModeStill').default, def('idleStop').default], ['broadcast', 'individual', 'off']);
+    assert.deepStrictEqual(def('txMode').options.map((o) => o[0]).sort(), def('txModeStill').options.map((o) => o[0]).sort(), 'the same two options for both');
+    const { svc, settings } = await makeService({});
+    assert.deepStrictEqual([svc.ctl.txMode, svc.ctl.txStill], ['broadcast', 'individual']);
+    settings.set('txModeStill', 'broadcast');
+    for (let k = 0; k < 30; k++) await tick();
+    assert.deepStrictEqual([svc.ctl.txMode, svc.ctl.txStill], ['broadcast', 'broadcast']);
+    settings.set('txMode', 'individual');
+    for (let k = 0; k < 30; k++) await tick();
+    assert.deepStrictEqual([svc.ctl.txMode, svc.ctl.txStill], ['individual', 'broadcast']);
+    await svc.stop();
 });
 
 /* ================= 6. handing everything back: factory off, locked, asleep, Restore OEM ================= */
@@ -495,10 +550,10 @@ test('the factory ambient lighting switched off: two releases at once, one read-
 test('a module that missed the whole-bus release is found by that read-back and released on its own', async () => {
     const { c, clock, bdc } = make({ deafKeys: ['2:5'] });
     await c.connect();
-    await c.apply(BLUE);                                       // (2:5 ignores NAD 0; a still colour is written to it directly)
+    await c.apply(BLUE);                                       // (2:5 ignores NAD 0: the first read-back repairs the colour)
     await clock.advance(4000);
-    assert.deepStrictEqual(Array.from(c.deaf), []);
-    assert.deepStrictEqual(phys(c, '2:5'), [0, 0, 254, 100, 'custom']);
+    assert.deepStrictEqual(Array.from(c.deaf), ['2:5']);
+    c.deaf.clear();                                            // as if it had only missed the release
     const n = writes(bdc).length;
     const r = await c.restoreOem();
     assert.strictEqual(r.ok, true);
@@ -508,7 +563,6 @@ test('a module that missed the whole-bus release is found by that read-back and 
     assert.deepStrictEqual(writes(bdc).slice(n).map(keyOf), ['1:0', '2:0', '2:5'], 'released singly after the read-back');
     assert.strictEqual(phys(c, '2:5')[4], 'oem');
     assert.strictEqual(c.stats.releaseRepairs, 1);
-    assert.deepStrictEqual(Array.from(c.deaf), ['2:5'], 'remembered: an animation will write it on its own');
     await clock.advance(60000);
     assert.strictEqual(writes(bdc).length, n + 3);
     assert.strictEqual(clock.pending(), 0);
@@ -584,12 +638,7 @@ test('a car that refuses NAD 0: the handback falls back to one release a module,
     await c.connect();
     await c.apply(BLUE);
     await c.scheduler.drain();
-    assert.strictEqual(c.broadcastOk, true, 'a still colour never asked for NAD 0');
-    const first = await c.restoreOem();                        // the first handback meets the refusal and falls back at once
-    assert.deepStrictEqual([first.ok, first.released], [true, 19]);
     assert.strictEqual(c.broadcastOk, false);
-    await c.apply(BLUE);
-    await c.scheduler.drain();
     const n = writes(bdc).length;
     const r = await c.restoreOem();
     assert.deepStrictEqual([r.ok, r.released], [true, 19]);
@@ -600,8 +649,8 @@ test('a car that refuses NAD 0: the handback falls back to one release a module,
 /* ================= 7. the settings, the screen ================= */
 test('settings: whole-bus writes and the door handback are on from the start; no red-door setting; the version', () => {
     const def = (k) => SPEC.settings.find((s) => s.key === k);
-    assert.strictEqual(SPEC.version, '0.5.3');
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.5.3');
+    assert.strictEqual(SPEC.version, '0.6.0');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version, '0.6.0');
     // the app's own icon (0.5.2): a PNG of the size the kit's icons have, small enough for MGU Store to show (128 KiB)
     const icon = fs.readFileSync(path.join(APP, 'icon.png'));
     assert.deepStrictEqual(Array.from(icon.slice(0, 8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);

@@ -7,11 +7,7 @@
  *              dial, saturation, the cabin from above lit as it would be, a zone picker, Apply / Cancel
  *   DUAL       upper and lower lighting with their own colour and brightness; swap, copy, save, Apply both
  *   MODES      Solid, Dual, and Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome
- *              Sweep, Sport Pulse: lighting_scene.js) with their upper / lower colours and speed, and the cabin
- *              moving as the mode would move it (lighting_preview.js: a picture, never a write); Apply
- *              A mode's colours are the ones ACTIVE in the car (active_colours.js: what is applied, else what the
- *              body controller reported, else the last applied), never an unsent draft, until the driver picks
- *              others on the page; the next Apply makes those the active ones.
+ *              Sweep, Sport Pulse: lighting_scene.js) with their upper / lower colours and speed; Apply
  *   FAVOURITES saved colours and saved complete configurations (colours, brightness, zones, mode, animation)
  *   DIAGNOSTICS link, body controller, transport performance, write controls
  *
@@ -36,8 +32,6 @@ const { withAlpha } = require('./kit/canvas');
 const C = require('./colour');
 const W = require('./ui_widgets');
 const S = require('./lighting_scene');
-const A = require('./active_colours');
-const { ModePreview } = require('./lighting_preview');
 const { service } = require('./lighting_service');
 
 const PAGES = ['Colours', 'Dual', 'Modes', 'Favourites', 'Diagnostics', 'Driving'];
@@ -91,12 +85,9 @@ mgu.run({
         const draft = {
             // (saturation is always 1: the ring picks pure hues; only the BDC's library colours carry their own)
             colours: { hsv: { h: 262, s: 1, v: 1 }, brightness: 100, zone: 0 },                          // zone: index into ZONE_ORDER
-            // (both selectors open at 100 %: openPage)
-            dual: { top: { hsv: { h: 270, s: 1, v: 1 }, brightness: 100 }, bottom: { hsv: { h: 200, s: 1, v: 1 }, brightness: 100 }, focus: 'top' },
-            // mode: index into MODE_ORDER; own[mode]: its colours were picked on the Modes page (else they follow the car's)
-            modes: { mode: 0, params: clone(S.DEFAULTS), own: {} },
+            dual: { top: { hsv: { h: 270, s: 1, v: 1 }, brightness: 80 }, bottom: { hsv: { h: 200, s: 1, v: 1 }, brightness: 45 }, focus: 'top' },
+            modes: { mode: 0, params: clone(S.DEFAULTS) },                                                 // mode: index into MODE_ORDER
         };
-        const preview = new ModePreview();                     // the Modes page's moving cabin: drawn, never written
         let dirty = { colours: false, dual: false, modes: false };
         const markDirty = (p) => { dirty[p] = true; };
 
@@ -118,41 +109,9 @@ mgu.run({
             const mode = MODE_ORDER[draft.modes.mode];
             if (mode === 'solid') return Object.assign({}, draft.modes.params.solid, { mode: 'solid' });
             if (mode === 'dual') return dualProgram();
-            // the one-time effects end on what is applied now; with nothing applied they run in the car's active
-            // colour and then hand the cabin back to it (an unsent draft is never taken for the car's colour)
-            if (S.ONCE[mode]) {
-                const on = still(ctl.program), l = on ? null : look();
-                return Object.assign({ mode, then: on || null }, l ? { colour: clone(l.top.colour), brightness: l.top.brightness } : {});
-            }
+            // the one-time effects end on what is applied now, else on the Colours page's colour
+            if (S.ONCE[mode]) return { mode, then: still(ctl.program) || { mode: 'solid', colour: rgbOf(draft.colours.hsv), brightness: draft.colours.brightness, zone: 'all' } };
             return Object.assign({}, draft.modes.params[mode], { mode, handlesTo: settings.get('handles') || 'bottom' });
-        }
-
-        /* ---------- the car's active colours, and the modes that take them ---------- */
-        /** { top, bottom, source } or null: what is applied, else what the car reported, else the last applied. */
-        function look() {
-            const last = favs.lastApplied();
-            return A.activeLook({ program: ctl.program, modules: ctl.slaves, handlesTo: settings.get('handles') || 'bottom', live: ctl.liveColours ? ctl.liveColours() : null, last: last ? last.program : null });
-        }
-        /** Every mode whose colours were not picked on the Modes page takes the active ones (the draft only). */
-        function syncModes() {
-            const l = look(), d = draft.modes;
-            if (!l) return null;
-            Object.keys(S.RUNNING).forEach((m) => { if (!d.own[m]) { d.params[m].top = clone({ colour: l.top.colour, brightness: l.top.brightness }); d.params[m].bottom = clone({ colour: l.bottom.colour, brightness: l.bottom.brightness }); } });
-            if (!d.own.solid) { d.params.solid.colour = clone(l.top.colour); d.params.solid.brightness = l.top.brightness; }
-            return l;
-        }
-        /**
-         * A page is opened. The Single and the Dual selector start at 100 % brightness each time (the selector's
-         * draft: nothing is sent, nothing counts as changed, the car keeps the brightness it has until Apply); the
-         * Modes page takes the car's active colours; leaving it stops its preview.
-         */
-        function openPage(i) {
-            editor.cancel();
-            if (page === 2 && i !== 2) preview.stop();
-            page = i; deleteMode = false;
-            if (i === 0) draft.colours.brightness = 100;
-            if (i === 1) { draft.dual.top.brightness = 100; draft.dual.bottom.brightness = 100; }
-            if (i === 2) syncModes();
         }
         const pageProgram = () => (page === 0 ? coloursProgram() : page === 1 ? dualProgram() : page === 2 ? modesProgram() : null);
 
@@ -165,9 +124,6 @@ mgu.run({
                 const notes = [r.failed ? r.failed + ' module(s) refused' : '', r.unanswered ? r.unanswered + ' write(s) unanswered, not resent' : '', r.missed ? r.missed + ' missed, written again' : ''].filter(Boolean);
                 say((what || 'Applied') + (notes.length ? ' (' + notes.join('; ') + ')' : '') + (ctl.kind === 'bdc-uds' && !ctl.armed ? ' [dry run]' : ''), notes.length ? 4500 : 2500);
                 dirty = { colours: false, dual: false, modes: false };
-                // what was applied is the car's colour now: every mode follows it again
-                draft.modes.own = {};
-                syncModes();
             } else say('Not applied: ' + (r.reason || 'refused'), 4500);
         }
         async function applyPage() { const p = pageProgram(); if (p) await applyProgram(p); }
@@ -206,11 +162,11 @@ mgu.run({
                 }
             }
         });
-        ctx.onTab((i) => { svc.touch(); openPage(i); });
+        ctx.onTab((i) => { svc.touch(); editor.cancel(); page = i; deleteMode = false; });
         ctx.ui.onClick('BTN_APPLY', () => { if (page <= 2) applyPage(); else say('Nothing to apply on this page', 1500); });
         ctx.ui.onClick('BTN_OEM', restoreOem);
-        ctx.ui.onClick('BTN_PAGE', () => openPage((page + 1) % PAGES.length));
-        ctx.__ambient = { svc, ctl: () => ctl, oem, drive, car: svc.car, factoryGate: () => svc.factoryGate(), gateTick: () => svc.gateTick(), followMode: (m, was) => svc.followMode(m, was), suspended: () => svc.suspended, draft, editor, favs, page: () => page, setPage: openPage, look, syncModes, preview, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
+        ctx.ui.onClick('BTN_PAGE', () => { editor.cancel(); page = (page + 1) % PAGES.length; deleteMode = false; });
+        ctx.__ambient = { svc, ctl: () => ctl, oem, drive, car: svc.car, factoryGate: () => svc.factoryGate(), gateTick: () => svc.gateTick(), followMode: (m, was) => svc.followMode(m, was), suspended: () => svc.suspended, draft, editor, favs, page: () => page, setPage: (i) => { page = i; }, dirty: () => dirty, applyPage, restoreOem, coloursProgram, dualProgram, modesProgram };
 
         /* ---------- drawing helpers ---------- */
         const linkPill = (cv, t, x, y, w) => {
@@ -245,9 +201,9 @@ mgu.run({
             // the list on the left: this page, the other ways of lighting the cabin
             G.panel(cv, t, 20, 60, 400, 452, 'Colour');
             const rows = [
-                ['Single colour', null], ['Dual colour', () => openPage(1)],
-                ['ANIMATION'], ...MODE_ORDER.slice(2).map((m, i) => [S.MODE_LABELS[m], () => { draft.modes.mode = i + 2; openPage(2); }]),
-                ['MORE'], ['Favourites', () => openPage(3)],
+                ['Single colour', null], ['Dual colour', () => { page = 1; }],
+                ['ANIMATION'], ...MODE_ORDER.slice(2).map((m, i) => [S.MODE_LABELS[m], () => { draft.modes.mode = i + 2; page = 2; }]),
+                ['MORE'], ['Favourites', () => { page = 3; }],
             ];
             // (nine rows and two headings in the panel: 34 px rows, so the last one, Favourites, ends inside it)
             let ly = 110;
@@ -350,24 +306,6 @@ mgu.run({
             dual: [], welcome: [], pulse: [],
         };
         const sideOf = (s) => ({ colour: rgbOf(s.hsv), brightness: s.brightness });
-        const HELP = {
-            solid: 'One colour on the whole cabin: the colour active in the car, or one picked here.',
-            dual: 'Upper and lower lighting with their own colours (set them on the Dual page).',
-            rainbow: 'The whole cabin through every colour, at the upper brightness.',
-            fade: 'Every light glides from the upper colour to the lower one and back.',
-            breathing: 'Upper and lower lighting breathe, each in its own colour.',
-            wave: 'A band of colour around the upper colour, rolling from the passenger doors to the dash and the driver doors.',
-            welcome: 'Once: the lights come on from the dashboard to the rear, then stay on what is applied now.',
-            pulse: 'Once: red for a moment, then back to what is applied now (the Sport greeting).',
-        };
-        /** Text in lines no wider than maxW (the kit's canvas does not wrap). */
-        const wrap = (cv, text, size, maxW) => {
-            const lines = [];
-            let line = '';
-            String(text).split(' ').forEach((w) => { const next = line ? line + ' ' + w : w; if (line && cv.textWidth(next, size) > maxW) { lines.push(line); line = w; } else line = next; });
-            if (line) lines.push(line);
-            return lines;
-        };
         function drawModes(cv, t) {
             editor.reset();
             const d = draft.modes, mode = MODE_ORDER[d.mode], params = d.params[mode];
@@ -378,64 +316,41 @@ mgu.run({
                 if (on) cv.strokeRoundRect(36, y, 408, 43, 12, 2, t.sel || t.accent);
                 cv.text(S.MODE_LABELS[m], 56, y + 29, 21, t.text, { font: 'bold' });
                 if (applied) G.pill(cv, t, 330, y + 8, 100, 28, 'ACTIVE', { color: t.accent, size: 13 });
-                // (picking a mode gives it the car's active colours, unless its own were picked on this page)
-                cv.target(36, y, 408, 43, () => { d.mode = i; syncModes(); markDirty('modes'); }, 'mode:' + m);
+                cv.target(36, y, 408, 43, () => { d.mode = i; markDirty('modes'); }, 'mode:' + m);
             });
-            // the selected mode: its settings on the left, the cabin moving as the mode would move it on the right
-            const P = { x: 480, y: 60, w: 1100, h: 452 }, CAR = { x: P.x + 746, y: P.y + 44, w: 344, h: 400 }, LEFT = CAR.x - P.x - 44;
+            // the selected mode's settings
+            const P = { x: 480, y: 60, w: 1100, h: 452 };
             G.panel(cv, t, P.x, P.y, P.w, P.h, S.MODE_LABELS[mode]);
-            wrap(cv, HELP[mode], 17, LEFT).slice(0, 2).forEach((line, i) => cv.text(line, P.x + 24, P.y + 70 + i * 22, 17, t.dim));
-            let px = P.x + 80;
-            const py = P.y + 134;
+            const help = { solid: 'One colour on the chosen zone (set it on the Colours page).', dual: 'Upper and lower lighting with their own colours (set them on the Dual page).', rainbow: 'The whole cabin through every colour, at the upper brightness.', fade: 'Every light glides from the upper colour to the lower one and back.', breathing: 'Upper and lower lighting breathe, each in its own colour.', wave: 'A band of colour around the upper colour, rolling from the passenger doors to the dash and the driver doors.', welcome: 'Once: the lights come on from the dashboard to the rear, then stay on what is applied now.', pulse: 'Once: red for a moment, then back to what is applied now (the Sport greeting).' }[mode];
+            cv.text(help, P.x + 24, P.y + 72, 17, t.dim);
+            let px = P.x + 80, py = P.y + 116;
             (MODE_PARAMS[mode] || []).forEach((row) => {
                 const [k, label, step, min, max, show] = row;
-                const get = () => Number(params[k]), set = (v) => { params[k] = Math.max(min, Math.min(max, v)); if (mode === 'solid') d.own.solid = true; markDirty('modes'); };
+                const get = () => Number(params[k]), set = (v) => { params[k] = Math.max(min, Math.min(max, v)); markDirty('modes'); };
                 editor.control({ key: 'p:' + k, get, set, step, min, max });
                 W.stepper(cv, t, px, py, 150, label, show ? show(get()) : get(), () => set(get() - step), () => set(get() + step), 'p:' + k, { editing: editor.isEditing('p:' + k) });
                 cv.target(px, py, 150, 46, enter('p:' + k), 'p:' + k);
                 px += 290;
+                if (px > P.x + P.w - 220) { px = P.x + 80; py += 84; }
             });
-            const l = look();
-            const from = d.own[mode] ? 'picked here' : l ? A.SOURCE_LABELS[l.source] : 'defaults (nothing applied or read yet)';
-            const useActive = (x, y) => G.button(cv, t, x, y, 0, 40, 'Use active', () => { delete d.own[mode]; if (!syncModes()) say('No active colour known yet: apply one first', 2500); markDirty('modes'); }, { key: 'useactive', busy: !l || !d.own[mode] });
-            let legend = null;
             if (S.RUNNING[mode]) {
-                // the two groups' colours: Ambient Config's upper and lower, from the car unless picked here
-                cv.text('COLOURS: ' + from.toUpperCase(), P.x + 24, P.y + 204, 12, t.dim, { font: 'bold', spacing: 2 });
-                W.swatch(cv, t, P.x + 24, P.y + 212, 200, 58, params.top.colour, 'upper ' + params.top.brightness + '%', { size: 20, radius: 12 });
-                W.swatch(cv, t, P.x + 240, P.y + 212, 200, 58, params.bottom.colour, 'lower ' + params.bottom.brightness + '%', { size: 20, radius: 12 });
+                // the two groups' colours: Ambient Config's upper and lower (taken from the Colours or the Dual page)
+                W.swatch(cv, t, P.x + 24, P.y + 206, 200, 62, params.top.colour, 'upper ' + params.top.brightness + '%', { size: 20, radius: 12 });
+                W.swatch(cv, t, P.x + 240, P.y + 206, 200, 62, params.bottom.colour, 'lower ' + params.bottom.brightness + '%', { size: 20, radius: 12 });
                 let ux = P.x + 24;
-                ux += useActive(ux, P.y + 280) + 10;
-                ux += G.button(cv, t, ux, P.y + 280, 0, 40, 'Use Colours page', () => { params.top = sideOf(draft.colours); params.bottom = sideOf(draft.colours); d.own[mode] = true; markDirty('modes'); }, { key: 'usecol' }) + 10;
-                G.button(cv, t, ux, P.y + 280, 0, 40, 'Use Dual page', () => { params.top = sideOf(draft.dual.top); params.bottom = sideOf(draft.dual.bottom); d.own[mode] = true; markDirty('modes'); }, { key: 'usedual' });
-                legend = [{ colour: C.rgbToHex(params.top.colour), text: 'upper' }, { colour: C.rgbToHex(params.bottom.colour), text: 'lower' }];
+                ux += G.button(cv, t, ux, P.y + 284, 0, 44, 'Use Colours page colour', () => { params.top = sideOf(draft.colours); params.bottom = sideOf(draft.colours); markDirty('modes'); }, { key: 'usecol' }) + 10;
+                G.button(cv, t, ux, P.y + 284, 0, 44, 'Use Dual page colours', () => { params.top = sideOf(draft.dual.top); params.bottom = sideOf(draft.dual.bottom); markDirty('modes'); }, { key: 'usedual' });
+                const whole = ctl.txMode === 'broadcast' && ctl.broadcastOk;
+                cv.text((whole ? 'Whole-bus writes: 2 writes a frame for Rainbow, Fade and Wave' : 'Single writes: ' + ctl.slaves.length + ' a frame (Settings: Writes to the car)') + (ctl.program && ctl.program.mode === mode ? '   ·   now ' + ctl.fps() + ' frames/s' : ''), P.x + 470, P.y + 244, 15, t.dim);
             }
             if (mode === 'solid') {
-                cv.text('COLOUR: ' + from.toUpperCase(), P.x + 24, P.y + 204, 12, t.dim, { font: 'bold', spacing: 2 });
-                W.swatch(cv, t, P.x + 24, P.y + 212, 200, 58, params.colour, params.brightness + '%', { size: 20, radius: 12 });
-                let ux = P.x + 24;
-                ux += useActive(ux, P.y + 280) + 10;
-                G.button(cv, t, ux, P.y + 280, 0, 40, 'Use Colours page', () => { params.colour = rgbOf(draft.colours.hsv); params.brightness = draft.colours.brightness; d.own.solid = true; markDirty('modes'); }, { key: 'usecol' });
-                legend = [{ colour: C.rgbToHex(params.colour), text: 'all lighting' }];
+                W.swatch(cv, t, P.x + 24, P.y + 278, 200, 62, rgbOf(draft.colours.hsv), 'colour', { size: 20, radius: 12 });
+                G.button(cv, t, P.x + 240, P.y + 290, 0, 44, 'Use Colours page colour', () => { params.colour = rgbOf(draft.colours.hsv); markDirty('modes'); }, { key: 'usecol' });
             }
-            if (S.ONCE[mode]) cv.text('Ends on: ' + (still(ctl.program) ? S.describe(still(ctl.program), ctl.slaves).slice(0, 60) : 'the car\'s own lighting'), P.x + 24, P.y + 232, 17, t.text);
-            // how this mode is written: an animation a whole LIN bus at a time, a still colour one module at a time
-            const whole = ctl.txMode === 'broadcast' && ctl.broadcastOk;
-            const how = S.isAnimated({ mode })
-                ? (whole ? 'Whole-bus writes' + (S.RUNNING[mode] && mode !== 'breathing' ? ': 2 a frame' : '') : 'Single writes: ' + ctl.slaves.length + ' a frame') + (ctl.program && ctl.program.mode === mode ? '   ·   now ' + ctl.fps() + ' frames/s' : '')
-                : 'Targeted writes: one per module, only where the colour changes';
-            cv.text(how, P.x + 24, P.y + 340, 14, t.dim);
-            applyRow(cv, t, P.x + 24, P.y + 352, 48, S.isAnimated({ mode }) ? (S.ONCE[mode] ? 'Run ' : 'Start ') + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
-            G.button(cv, t, P.x + 480, P.y + 406, 0, 40, 'Save preset', () => { const p = favs.addPreset(S.MODE_LABELS[mode] + ' ' + new Date().toISOString().slice(11, 16), modesProgram()); say('Saved ' + p.name); }, { key: 'savepreset' });
+            if (S.ONCE[mode]) cv.text('Ends on: ' + (still(ctl.program) ? S.describe(still(ctl.program), ctl.slaves) : 'the Colours page colour'), P.x + 24, P.y + 300, 17, t.text);
+            const sx = applyRow(cv, t, P.x + 24, P.y + 352, 48, S.isAnimated({ mode }) ? (S.ONCE[mode] ? 'Run ' : 'Start ') + S.MODE_LABELS[mode] : 'Apply', dirty.modes);
+            G.button(cv, t, sx, P.y + 352, 0, 48, 'Save as preset', () => { const p = favs.addPreset(S.MODE_LABELS[mode] + ' ' + new Date().toISOString().slice(11, 16), modesProgram()); say('Saved ' + p.name); }, { key: 'savepreset' });
             linkPill(cv, t, P.x + 24, P.y + 410); statePill(cv, t, P.x + 204, P.y + 410, 260);
-            // the preview: the same cabin as the Colours and the Dual page, lit by the same renderer the car's frames
-            // come from, at this moment of the mode. Drawn only; nothing here reaches the controller.
-            let scene = null;
-            try { scene = preview.scene(modesProgram(), ctl.slaves, Date.now(), ctl.program ? { program: ctl.program, phase0: ctl.phase0 } : null); } catch (e) { scene = null; }
-            W.carView(cv, t, CAR.x, CAR.y, CAR.w, CAR.h, ctl.slaves, scene, {
-                heading: 'front · right-hand drive', deep: true, legend,
-                status: preview.running ? 'on the car now' : 'preview', statusColour: preview.running ? t.ok : t.warn,
-            });
         }
 
         /* ---------- FAVOURITES ---------- */
@@ -450,7 +365,7 @@ mgu.run({
                 cv.roundRect(x, y, 170, 60, 12, f.hex);
                 cv.text(f.hex, x + 85, y + 36, 18, C.luma(rc) > 0.55 ? '#000000' : '#ffffff', { align: 'center', font: 'bold' });
                 if (deleteMode) cv.text('TAP TO DELETE', x + 85, y + 53, 11, C.luma(rc) > 0.55 ? '#330000' : '#ffbbbb', { align: 'center', font: 'bold', spacing: 1.5 });
-                cv.target(x, y, 170, 60, () => { if (deleteMode) { favs.remove(f.hex); say('Removed ' + f.hex); } else { draft.colours.hsv = hsvOf(rc); markDirty('colours'); openPage(0); say('Colour loaded: Apply to use it', 2000); } }, 'fav:' + f.hex);
+                cv.target(x, y, 170, 60, () => { if (deleteMode) { favs.remove(f.hex); say('Removed ' + f.hex); } else { draft.colours.hsv = hsvOf(rc); markDirty('colours'); page = 0; say('Colour loaded: Apply to use it', 2000); } }, 'fav:' + f.hex);
                 x += 180; if (x + 170 > 780) { x = 44; y += 70; }
             });
             G.panel(cv, t, 800, 60, 780, 452, 'Saved configurations');
@@ -515,9 +430,8 @@ mgu.run({
                 ['BDC variant', caps.variant ? caps.variant.index + ' ' + (caps.variant.sgbd || '?') + ' (' + caps.rgbActuator + ')' : '-'],
                 ['Modules', s.slaves.length + ' (' + s.slaves.filter((m) => m.bus === 1).length + ' on bus 1, ' + s.slaves.filter((m) => m.bus === 2).length + ' on bus 2), ' + s.driven + ' driven'],
                 ['Applied', s.description],
-                ['Writer', s.writer === 'bus' ? 'animation: ' + (s.writeMode === 'broadcast' ? 'whole-bus writes (NAD 0)' : 'single writes (whole-bus off or refused)') : s.writer === 'targeted' ? 'still colour: targeted, one write per module' : 'none (nothing applied)'],
                 ['Writes', (sc.writes || 0) + ' sent, ' + (sc.accepted || 0) + ' ok, ' + (sc.rejected || 0) + ' refused, ' + (sc.busy || 0) + ' busy (' + (sc.maxBusyRetries == null ? '?' : sc.maxBusyRetries) + ' retries), ' + (sc.timeouts || 0) + ' unanswered (never resent), ' + (sc.skipped || 0) + ' skipped'],
-                ['Transport', (s.txMode === 'broadcast' ? (s.broadcastOk ? 'whole-bus writes for animations (' + (s.stats.broadcasts || 0) + (s.deaf && s.deaf.length ? ', single for ' + s.deaf.join(' ') : '') + '), ' : 'whole-bus refused: single writes, ') : '') + (s.stats.busReleases ? s.stats.busReleases + ' whole-bus releases, ' : '') + (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
+                ['Transport', (s.txMode === 'broadcast' ? (s.broadcastOk ? 'whole-bus writes (' + (s.stats.broadcasts || 0) + (s.deaf && s.deaf.length ? ', single for ' + s.deaf.join(' ') : '') + '), ' : 'whole-bus refused: single writes, ') : '') + (s.stats.busReleases ? s.stats.busReleases + ' whole-bus releases, ' : '') + (sc.avgLatencyMs == null ? '-' : sc.avgLatencyMs + ' ms per write') + ', ' + (sc.writesPerSec || 0) + ' writes/s, ' + (sc.queued || 0) + ' queued, in flight ' + (sc.inFlight || 0) + '/' + (sc.maxInFlight || 1)],
                 ['Keep-alive', 'ZEIT ' + s.holdSeconds + ' s, renewed after ' + Math.round(s.renewMs / 100) / 10 + ' s; ' + (s.stats.verified ? (s.stats.confirmed || 0) + ' read back ok, ' + (s.stats.missed || 0) + ' missed' + (s.verifying ? ' (reading)' : '') + '; ' : '') + (s.stats.keepAlives || 0) + ' refreshes, last apply ' + (s.stats.lastApplyMs == null ? '-' : s.stats.lastApplyMs + ' ms')],
                 ['Animation', s.moving ? s.fps + ' frames/s, ' + (s.stats.framesWritten || 0) + ' frames written, none queued' : 'none'],
                 ['Parking', s.parkedPolicy + (svc.parked ? ', speed ' + (svc.parked.speed() == null ? 'unknown' : Math.round(svc.parked.speed()) + ' km/h') : ', no speed signal')],
@@ -527,7 +441,7 @@ mgu.run({
                 ['Signals', svc.car.summary() + (s.released && s.released.length ? '; with BMW: ' + s.released.join(' ') : '')],
                 ['Gate', s.gate || 'open'],
             ];
-            G.table(cv, t, 36, 92, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 20, size: 14 });
+            G.table(cv, t, 36, 94, 730, [{ w: 150, title: '' }, { w: 580, title: '' }], rows, { rowH: 20, size: 14 });
             G.panel(cv, t, 800, 60, 780, 452, 'Modules' + (s.slaves.length ? ' (' + s.slaves.length + ')' : ''));
             const sl = s.slaves.slice(0, 15).map((x) => { const tg = s.scene[x.bus + ':' + x.nad]; return [x.bus + ':' + x.nad, (x.location || '').slice(0, 40), tg ? C.rgbToHex(tg) + ' ' + tg.brightness + '%' : (x.driven ? 'releasing' : 'OEM') + (x.failures ? ' NRC' : '')]; });
             if (!sl.length) sl.push(['-', s.kind === 'bdc-uds' ? 'read 22 DA 5F / E3 D1 failed or no link' : 'none', '']);

@@ -1,8 +1,8 @@
 {
   "id": "ambient_rgb",
   "title": "Ambient RGB",
-  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) written a whole LIN bus at a time and previewed on the cabin view in the car's active colours, still colours written one module at a time, lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
-  "version": "0.5.3",
+  "description": "BMW Ambient RGB Controller: colour wheel and brightness dial, dual colour (upper / lower), zones, the MGU App Kit Ambient Config's animations (Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep, Sport Pulse) with a write method of their own (the still colours have theirs), lighting by driving mode, saved configurations, the indicator's side glowing green, dimming at night. Runs in the background; the factory lighting keeps priority: over a still colour an open door's line goes back to BMW's own warning light, and custom lighting is released when the car is left or the factory ambient lighting is switched off.",
+  "version": "0.6.0",
   "vendor": "custom",
   "loggingId": "OAB1",
   "iconGlyph": "RGB",
@@ -41,7 +41,7 @@
       "statusFESVehicleDynamicSwitchHMI": "rs"
     },
     "de.bmw.infrastructure.VehicleCondition": {
-      "_optional": "the car locked and left is not noticed: custom lighting then stops by itself after 15 minutes without use",
+      "_optional": "the car locked and left is not noticed from this interface: custom lighting then stays on until the head unit stops the app (or, with the setting \"Car state unknown\", stops after 15 minutes without use)",
       "VehicleCondition": "s"
     },
     "de.bmw.body.DoorsWindowsRoofMirrors": {
@@ -168,29 +168,45 @@
     },
     {
       "key": "txMode",
-      "label": "How animations are written",
+      "label": "Modes (animations): writes to the car",
       "type": "choice",
       "default": "broadcast",
       "options": [
         [
           "broadcast",
-          "Whole bus (NAD 0); still colours always one write per module"
+          "Whole bus where it saves writes (NAD 0, read back afterwards)"
         ],
         [
           "individual",
-          "One per module for animations too (handing back still uses the whole bus)"
+          "One per module (handing back still uses the whole bus)"
+        ]
+      ]
+    },
+    {
+      "key": "txModeStill",
+      "label": "Solid / Dual colours: writes to the car",
+      "type": "choice",
+      "default": "individual",
+      "options": [
+        [
+          "individual",
+          "One per module (handing back still uses the whole bus)"
+        ],
+        [
+          "broadcast",
+          "Whole bus where it saves writes (NAD 0, read back afterwards)"
         ]
       ]
     },
     {
       "key": "verify",
-      "label": "Read back after a still colour is applied",
+      "label": "Read back after Apply (single writes)",
       "type": "choice",
       "default": "off",
       "options": [
         [
           "off",
-          "Off (every module answers for its own write)"
+          "Off (whole-bus writes are always read back, in the background)"
         ],
         [
           "on",
@@ -227,6 +243,22 @@
         [
           "on",
           "On"
+        ]
+      ]
+    },
+    {
+      "key": "idleStop",
+      "label": "Car state unknown, app not on screen",
+      "type": "choice",
+      "default": "off",
+      "options": [
+        [
+          "off",
+          "Keep custom lighting on while it is applied"
+        ],
+        [
+          "on",
+          "Stop it after 15 minutes without use"
         ]
       ]
     },
@@ -286,7 +318,7 @@
       "options": [
         [
           "on",
-          "That door's contour line goes back to BMW (its own red warning light)"
+          "Over a still colour, that door's contour line goes back to BMW (its red warning light); modes keep running"
         ],
         [
           "off",

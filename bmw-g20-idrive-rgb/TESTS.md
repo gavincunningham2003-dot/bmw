@@ -9,6 +9,21 @@ npm run test:py          # python -m unittest discover -s tests/python -p "test_
 npm run preview          # PNGs of the pages in preview/ (docs/screens/ holds a copy)
 ```
 
+## Results, 0.6.0 (2026-11-14, Windows 11, Node 24, Python 3.12, kit `64486c5`)
+
+```
+npm test          TOTAL: 198 passed, 0 failed
+npm run test:py   Ran 37 tests ... OK (skipped=8)
+```
+
+New or restated for 0.6.0, in `tests/node/test_v051.js` (sections 5 and 5b) and `tests/node/test_v050.js`: the two
+write settings (a still colour one write a module while a mode goes out a whole bus at a time, and the other way
+round; the full handback two NAD 0 releases with either), a door during Rainbow and Colour Wave (no release, the
+line stays in the animation), a door over a still colour with either setting (one release to that line, never
+NAD 0; a mode started with the door open takes the line and the still colour after it releases it again), a
+partial handback never being a whole-bus release, lighting staying on for an hour with no vehicle state and no
+screen, the 15-minute stop behind its setting, and a car that says it is left still being released at once.
+
 ## Results, 0.5.1 and 0.5.2 (2026-11-13, Windows 11, Node 24, Python 3.12, kit `64486c5` and kit `89de8c0`)
 
 ```

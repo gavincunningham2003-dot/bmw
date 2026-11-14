@@ -23,7 +23,9 @@
  *   lapse     a reason to STOP WRITING and send nothing more, not even a release (the car may be going to sleep;
  *             every module returns to the factory lighting by itself when its ZEIT runs out):
  *               - the car's state is not known: VehicleCondition never arrived or its provider is gone, AND
- *                 nothing has shown the car in use for idleMs (it moved, or the app's screen was used)
+ *                 nothing has shown the car in use for idleMs (it moved, or the app's screen was used). From
+ *                 0.6.0 this timeout does not run while custom lighting is ON, unless the setting "idleStop"
+ *                 asks for it: the lighting does not go out because the screen is not shown
  *               - whether the factory ambient lighting is on is not known (nothing received, "unfilled", provider
  *                 gone), with the same setting as above
  *             A missing signal is never read as "the car is in use" or "the factory lighting is on".
@@ -54,7 +56,7 @@ const COMFORT_SOCK = '/run/iteriodev-comfort/ctl.sock';
 const IDLE_MS = 15 * 60000;            // the car's state unknown: this long without a sign of use = not in use
 const NIGHT_DIM = 0.5;
 const GATE_MS = 1500;
-const LINK_KEYS = ['backend', 'arm', 'unknownVariant', 'inflight', 'parked', 'simLatency', 'txMode', 'verify', 'refresh', 'busyRetries'];
+const LINK_KEYS = ['backend', 'arm', 'unknownVariant', 'inflight', 'parked', 'simLatency', 'txMode', 'txModeStill', 'verify', 'refresh', 'busyRetries'];
 const still = (p) => (p && S.onceMs(p) ? p.then : p);
 
 let instance = null;
@@ -155,7 +157,7 @@ class LightingService extends EventEmitter {
             // one request in flight unless the driver asked for the experiment: the TASU path is not proven to take two
             maxInFlight: settings.get('inflight') === '2' ? 2 : 1, parkedPolicy: settings.get('parked') === 'lenient' ? 'lenient' : 'strict',
             parked: () => (this.parked ? (this.parked.speed() === null ? null : !this.parked.moving()) : null),
-            gate: () => this.gate(), txMode: settings.get('txMode'), verify: settings.get('verify') === 'on',
+            gate: () => this.gate(), txMode: settings.get('txMode'), txStill: settings.get('txModeStill'), verify: settings.get('verify') === 'on',
             maxBusyRetries: isNaN(retries) ? 3 : retries, maxCommandMs: 5000,
         };
         ['now', 'setTimeout', 'clearTimeout'].forEach((k) => { if (this.o[k]) common[k] = this.o[k]; });
@@ -200,6 +202,9 @@ class LightingService extends EventEmitter {
         if (a === true) return 'away';
         if (a === false) return 'inUse';
         if (this.parked && this.parked.moving && this.parked.moving()) this._activeAt = this.now();
+        // custom lighting that is on counts as the car in use: it does not stop because the app's screen is not shown
+        // (setting "idleStop"; a car that SAYS it is locked or left still releases it, above)
+        if (this.settings.get('idleStop') !== 'on' && this.ctl && this.ctl.program) this._activeAt = this.now();
         return this.now() - this._activeAt < this.idleMs ? 'inUse' : 'unknown';
     }
     /** Why every module must be handed back now, or null. */

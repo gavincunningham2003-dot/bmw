@@ -19,21 +19,7 @@
  *                      ZEIT * keepAliveFactor; animated programs: frames carry the refresh, and modules whose target
  *                      has not changed are forced in before they could lapse
  *
- * TWO WRITE METHODS, ONE WRITER (0.5.3). What is applied decides how it is written, and only one of the two is
- * ever live:
- *
- *   still colours    Single Colour, Dual Colour, Zones: _writeTargeted(). One write per module, to that module's own
- *   (targeted)       NAD (2E DA5E / 2E E3D1, the write verified on the car on 2026-11-04); NAD 0 is never used, so a
- *                    module is touched only when ITS colour changes: changing the upper colour of Dual writes the
- *                    upper modules and leaves the lower ones alone. Kept on by the keep-alive timer.
- *   animated modes   Rainbow, Fade, Breathing, Wave, Welcome, Pulse: _writeWholeBus(). The colour most lights of a
- *   (whole bus)      LIN bus want as one write to NAD 0, then the lights that differ; frame by frame, by the ticker.
- *
- * Both hand their writes to the SAME scheduler (one request at a time), and apply() stops the one before the other
- * starts: the ticker and queued frames are cancelled before a still colour is written, the keep-alive before the
- * first frame. writer() says which is live. Handing back (restoreOem) is the factory release for both.
- *
- * THE UPDATE METHOD of the animated modes is the MGU App Kit's Ambient Config's (apps/ambient_config/lights.js, MIT, (c) its authors;
+ * THE UPDATE METHOD is the MGU App Kit's Ambient Config's (apps/ambient_config/lights.js, MIT, (c) its authors;
  * THIRD_PARTY.md), ported onto this controller's scheduler and gates. What is taken from it, by its own names:
  *
  *   _plan / _next   a frame is every light at the colour of ONE moment; per LIN bus the colour most lights want goes
@@ -56,8 +42,13 @@
  * says so), and holds a still colour for 60 s (here the driver's "Keep-alive" setting, 10 s by default, so the
  * factory lighting is back within that time whatever happens to the app).
  *
- * AN OPEN DOOR (lighting_overlay.js): that door's contour line has no target, so it is released with the factory
- * handback and then left alone: no single write, no keep-alive, and no NAD 0 write on its bus while the door is
+ * TWO SETTINGS FOR HOW WRITES GO OUT (0.6.0): txMode for the modes (the animations), txStill for the still colours
+ * (Solid, Dual, zones). Each is 'broadcast' (NAD 0 where it saves writes) or 'individual' (one write a module);
+ * _mode() picks by what is applied. The full handback (restoreOem) is one NAD 0 release a bus with either.
+ *
+ * AN OPEN DOOR (lighting_overlay.js), over a STILL colour only (a running mode keeps the door's line, _fx()): that
+ * door's contour line has no target, so it is released with the factory handback (one release to that module,
+ * never a whole-bus one) and then left alone: no single write, no keep-alive, and no NAD 0 write on its bus while the door is
  * open (the rest of that bus is written singly). When the door closes the module is in the scene again and gets
  * the colour of that moment.
  *
@@ -107,7 +98,8 @@ class LightingController extends EventEmitter {
         this.parkedPolicy = o.parkedPolicy || 'strict';                           // 'strict': no apply unless parked() === true
         this.parked = o.parked || null;                                          // fn() -> true | false | null (unknown)
         this.gate = o.gate || null;                                              // fn() -> null | why custom lighting must stay off (car left, factory lighting off, another controller)
-        this.txMode = o.txMode === 'broadcast' ? 'broadcast' : 'individual';     // 'broadcast': NAD 0 where it saves writes (lighting_plan.js)
+        this.txMode = o.txMode === 'broadcast' ? 'broadcast' : 'individual';     // how MODES (animations) are written. 'broadcast': NAD 0 where it saves writes (lighting_plan.js)
+        this.txStill = o.txStill === 'broadcast' ? 'broadcast' : 'individual';   // how STILL colours (Solid, Dual, zones) are written: a setting of its own (0.6.0)
         this.broadcastOk = true;                                                 // false once the car refused a NAD 0 write
         this.deaf = new Set();                                                   // modules seen to miss a whole-bus write: written singly after it
         this.moveSeconds = Math.max(2, Math.min(30, o.moveSeconds || MOVE_HOLD_S));   // ZEIT of a moving program's writes
@@ -127,9 +119,6 @@ class LightingController extends EventEmitter {
         this._viaBus = new Set();          // modules whose last write was a whole-bus one
         this._sent = new Map();            // key -> the colour last written to it (the read-back after handing back)
         this._verifyTimer = null;          // the background read-back
-        this._lastRead = null;             // { n, at, modules }: what the body controller last reported for every module
-        this._seq = 0;                  // reads and writes, counted: which came last
-        this._touched = 0;                 // the count at the last write of ours (a read from before it does not show the car's own colours)
         this._tickRun = 0;                 // which ticker loop is the live one
         this._shortHold = false;           // frames (short ZEIT) were written since the last full still write
         this._unanswered = 0;              // writes in a row without a reply
@@ -174,8 +163,6 @@ class LightingController extends EventEmitter {
             this.slaves = ((this.capabilities && this.capabilities.slaves) || []).map((s) => Object.assign({}, s));
             this.byKey = new Map(this.slaves.map((s) => [S.key(s), s]));
             if (!this.capabilities || !this.capabilities.available) { this._setState('disconnected', (this.capabilities && this.capabilities.reason) || 'transport unavailable'); return this.capabilities; }
-            // the probe read every module's colour: the car's own, as long as nothing of ours is on
-            if (!this.driven.size && this.slaves.some((s) => s.r != null)) this._lastRead = { n: ++this._seq, at: this._now(), modules: this.slaves.map((s) => Object.assign({}, s)) };
             this._setState('connected', null);
         } catch (e) {
             this.capabilities = { available: false, reason: String(e && e.message || e) };
@@ -223,9 +210,6 @@ class LightingController extends EventEmitter {
             this._stopTicker(); this._stopOnce(); this._stopVerify();
             this.scheduler.clear('frame');
             const wasAnimated = S.isAnimated(this.program);
-            // an animation, and the first still colour after frames (short ZEIT, whole-bus writes), go out in full; a
-            // still colour over a still one writes only the modules whose colour changes or is due for renewal
-            const full = S.isAnimated(p) || this._shortHold;
             this.program = p;
             if (!wasAnimated || !S.isAnimated(p)) this.phase0 = this._now();
             const scene = this._compose(this._now());
@@ -233,7 +217,7 @@ class LightingController extends EventEmitter {
             const stale = this._gone(scene);
             if (stale.length) this._release(stale, scene);
             const keys = Object.keys(scene);
-            this._submit(scene, 'apply', full ? { all: true } : { force: this._staleKeys(scene) });
+            this._submit(scene, 'apply', { all: true });
             this.scene = scene;
             this._shortHold = this._moving();
             this.stats.applies++;
@@ -367,7 +351,7 @@ class LightingController extends EventEmitter {
     /** What every module should show at now: the applied program (dimmed at night) with the effects over it. */
     _compose(now) {
         const base = this.program ? S.render(this.program, this.slaves, now, { phase0: this.phase0 }) : {};
-        return O.compose(base, this.slaves, this.effects, now);
+        return O.compose(base, this.slaves, this._fx(), now);
     }
     /**
      * The modules to hand back: driven by this controller and without a target in the scene (the program leaves
@@ -377,7 +361,7 @@ class LightingController extends EventEmitter {
         return Array.from(this.driven).filter((k) => !scene[k]).filter((k) => { const l = this.scheduler.last.get(k); return !(l && l.unanswered && l.params && l.params.active === false); }).map((k) => this.byKey.get(k)).filter(Boolean);
     }
     /** Is there anything that changes with time (so frames are needed)? */
-    _moving() { return S.isAnimated(this.program) || O.moving(this.effects, this.slaves); }
+    _moving() { return S.isAnimated(this.program) || O.moving(this._fx(), this.slaves); }
 
     /* ---------- the loops ---------- */
     /** ZEIT of the writes now: a still program holds refreshSeconds, a moving one moveSeconds (5 s) at most. */
@@ -385,44 +369,32 @@ class LightingController extends EventEmitter {
     /** A module is written again once its last write is this old: a moving scene after 3 s of its 5 (lights.js), a still one at keepAliveFactor of its hold. */
     renewMs() { const hold = this.holdSeconds() * 1000; return this._moving() ? Math.min(MOVE_RENEW_MS, Math.round(hold * 0.6)) : hold * this.keepAliveFactor; }
     _params(t) { return { active: true, r: t.r, g: t.g, b: t.b, brightness: t.brightness, seconds: this.holdSeconds() }; }
+    /** The write method now: a mode (animation) follows txMode; a still colour, and an effect over it or over the car's own lighting, txStill. */
+    _mode() { return (S.isAnimated(this.program) ? this.txMode : this.txStill) === 'broadcast' && this.broadcastOk ? 'broadcast' : 'individual'; }
     /**
-     * Which write method the applied lighting uses: 'bus' (an animated mode, whole-bus writes where the car and the
-     * setting allow them), 'targeted' (a still colour: one write per module, never NAD 0), null (nothing applied).
+     * The effects that count now. An open door hands its line back to BMW only over a STILL colour: while a mode
+     * (an animation) runs, the door's line stays in the animation and nothing is released (0.6.0).
      */
-    writer() { return !this.program ? null : S.isAnimated(this.program) ? 'bus' : 'targeted'; }
-    _mode() { return this.writer() === 'bus' && this.txMode === 'broadcast' && this.broadcastOk ? 'broadcast' : 'individual'; }
+    _fx() { return S.isAnimated(this.program) && this.effects.doors.length ? Object.assign({}, this.effects, { doors: [] }) : this.effects; }
     /** The module keys a scheduler key reaches: its own, or every module of the bus for NAD 0. */
     _covers(key) { const m = /^(\d+):0$/.exec(key); return m ? this.slaves.filter((s) => s.bus === +m[1]).map(S.key) : [key]; }
-    /** Queue the writes that put a scene on, by the method of what is applied (see the header): never both. */
-    _submit(scene, prio, o) { return this._mode() === 'broadcast' ? this._writeWholeBus(scene, prio, o) : this._writeTargeted(scene, prio, o); }
-    /**
-     * STILL COLOURS (and anything else without an animated program: an effect over a still colour or over the car's
-     * own lighting, a car or a setting without whole-bus writes): every module that is due gets its own write, to
-     * its own NAD. A module whose colour is what was last written to it, and not due for renewal, is not written.
-     */
-    _writeTargeted(scene, prio, o) { return this._queue(this._plan(scene, 'individual', o), prio); }
-    /** ANIMATED MODES: per LIN bus one write to NAD 0 for the colour most lights want, then the lights that differ. */
-    _writeWholeBus(scene, prio, o) { return this._queue(this._plan(scene, 'broadcast', o), prio); }
-    _plan(scene, mode, o) {
-        return PL.plan(scene, this.slaves, this.scheduler.last, { mode, params: (t) => this._params(t), force: new Set((o && o.force) || []), all: !!(o && o.all), deaf: this.deaf, order: (m) => S.lightOf(m).y });
-    }
-    _queue(items, prio) {
+    /** Queue the writes that put a scene on (lighting_plan.js decides between single and whole-bus writes). */
+    _submit(scene, prio, o) {
+        const items = PL.plan(scene, this.slaves, this.scheduler.last, { mode: this._mode(), params: (t) => this._params(t), force: new Set((o && o.force) || []), all: !!(o && o.all), deaf: this.deaf, order: (m) => S.lightOf(m).y });
         if (prio === 'frame') return Object.assign(this.scheduler.frame(items.map((it) => ({ key: it.key, slave: it.slave, params: it.params })), items.filter((it) => it.force).map((it) => it.key)), { planned: items.length });
         items.forEach((it) => this.scheduler.set(it.key, it.slave, it.params, prio, true));
         return { planned: items.length };
     }
     /**
-     * Hand modules back. scene: what stays lit (its modules must not be touched, so their bus is never released
-     * whole); null: nothing stays, every bus goes back with one NAD 0 write (lighting_plan.planRelease).
+     * Hand modules back. scene: a PARTIAL handback (an open door's line, a zone no longer lit): one release to each
+     * module asked for and never a whole-bus one, whatever else is lit. null: the full handback, every bus goes back
+     * with one NAD 0 write (lighting_plan.planRelease).
      */
     _release(slaves, scene) {
-        // (a scene given = a partial handback, an open door's line above all: ALWAYS one release per module, to that
-        // module's own address, never NAD 0, even when nothing else on its bus is lit. Only the full handback is whole-bus.)
         PL.planRelease(slaves, this.slaves, { whole: this.broadcastOk && !scene, keep: new Set(Object.keys(scene || {})), deaf: this.deaf }).forEach((it) => this.scheduler.set(it.key, it.slave, it.params, 'release', true));
     }
     _onWritten(key, params) {
         const colour = { r: params.r, g: params.g, b: params.b };
-        this._touched = ++this._seq;
         if (PL.isBusKey(key)) {
             if (params.active) this.stats.broadcasts++; else this.stats.busReleases++;
             // the whole bus now shows this: what was last written to each of its modules is this write
@@ -440,7 +412,6 @@ class LightingController extends EventEmitter {
      */
     _onUnanswered(key, params) {
         this.stats.unanswered++;
-        this._touched = ++this._seq;
         this.history.push({ t: this._now(), key, reason: 'no reply (not resent)' });
         if (this.history.length > 30) this.history.shift();
         const keys = this._covers(key);
@@ -465,23 +436,7 @@ class LightingController extends EventEmitter {
      */
     async _readBack() {
         this.scheduler.hold();
-        try {
-            await this.scheduler.idle();
-            const read = await this._readSlaves();
-            // (no write is in flight during a read: the scheduler is held)
-            if (read) this._lastRead = { n: ++this._seq, at: this._now(), modules: read.map((s) => Object.assign({}, s)) };
-            return read;
-        } catch (e) { this.log.warn('read-back: ' + e); return null; } finally { this.scheduler.unhold(); }
-    }
-    /**
-     * The car's OWN colours, module by module, as the body controller last reported them: [{ bus, nad, r, g, b,
-     * brightness }], or null when they are not known. Known means: nothing is applied or driven, and the last read
-     * (the probe, a read-back) is from after the last write of ours, so it shows the factory lighting and not a
-     * colour of this app's. Nothing is requested here.
-     */
-    liveColours() {
-        if (this.program || this.driven.size || !this._lastRead || this._lastRead.n < this._touched) return null;
-        return this._lastRead.modules.filter((m) => m.r != null).map((m) => ({ bus: m.bus, nad: m.nad, r: m.r, g: m.g, b: m.b, brightness: m.brightness }));
+        try { await this.scheduler.idle(); return await this._readSlaves(); } catch (e) { this.log.warn('read-back: ' + e); return null; } finally { this.scheduler.unhold(); }
     }
     _stopVerify() { if (this._verifyTimer) { this._clearTimeout(this._verifyTimer); this._verifyTimer = null; } }
     /**
@@ -526,9 +481,6 @@ class LightingController extends EventEmitter {
                 const ours = read.filter((m) => { const c = sent.get(S.key(m)); return !!c && m.r != null && near(c.r, m.r) && near(c.g, m.g) && near(c.b, m.b); }).map((m) => this.byKey.get(S.key(m))).filter(Boolean);
                 if (ours.length) {
                     this.stats.releaseRepairs += ours.length;
-                    // handed back with a whole-bus release and still lit: that module does not hear NAD 0. Still
-                    // colours are written to it directly anyway; an animation's whole-bus frames now add its own write
-                    ours.forEach((m) => { const b = this.scheduler.last.get(PL.busKey(m.bus)); if (b && b.ok && b.params && b.params.active === false && !this.deaf.has(S.key(m))) { this.deaf.add(S.key(m)); this.log.info('read-back: ' + S.key(m) + ' missed a whole-bus release: single writes for it from now on'); } });
                     this.log.info('read-back: ' + ours.map(S.key).join(' ') + ' still showed our colour: released singly');
                     this.scheduler.release(ours);
                 }
@@ -569,9 +521,9 @@ class LightingController extends EventEmitter {
         return { confirmed, missed: missed.length, unread };
     }
     _same(a, b) { return !!a && !!b && a.active === b.active && a.r === b.r && a.g === b.g && a.b === b.b && a.brightness === b.brightness; }
-    _staleKeys(scene) {
+    _staleKeys() {
         const limit = this._now() - this.renewMs();
-        return Object.keys(scene || this.scene).filter((k) => { const l = this.scheduler.last.get(k); return !l || !(l.ok || l.unanswered) || l.at <= limit; });
+        return Object.keys(this.scene).filter((k) => { const l = this.scheduler.last.get(k); return !l || !(l.ok || l.unanswered) || l.at <= limit; });
     }
     _stopKeepAlive() { if (this._keepTimer) { this._clearTimeout(this._keepTimer); this._keepTimer = null; } }
     _armKeepAlive() {
@@ -680,8 +632,8 @@ class LightingController extends EventEmitter {
     status() {
         return {
             kind: this.kind, state: this.state, custom: this.custom, program: this.program, description: this.program ? S.describe(this.program, this.slaves) : 'OEM',
-            animated: S.isAnimated(this.program), moving: this._moving(), effects: Object.assign({}, this.effects), released: O.releasedKeys(this.effects, this.slaves), fps: this.fps(), refreshSeconds: this.refreshSeconds, holdSeconds: this.holdSeconds(), renewMs: this.renewMs(), frameMs: this.frameMs, checkMs: this.checkMs, verifying: !!this._verifyTimer, parkedPolicy: this.parkedPolicy,
-            txMode: this.txMode, writer: this.writer(), writeMode: this._mode(), broadcastOk: this.broadcastOk, deaf: Array.from(this.deaf), verify: this.verify, gate: this.gate ? this.gate() : null,
+            animated: S.isAnimated(this.program), moving: this._moving(), effects: Object.assign({}, this.effects), released: O.releasedKeys(this._fx(), this.slaves), fps: this.fps(), refreshSeconds: this.refreshSeconds, holdSeconds: this.holdSeconds(), renewMs: this.renewMs(), frameMs: this.frameMs, checkMs: this.checkMs, verifying: !!this._verifyTimer, parkedPolicy: this.parkedPolicy,
+            txMode: this.txMode, txStill: this.txStill, writeMode: this._mode(), broadcastOk: this.broadcastOk, deaf: Array.from(this.deaf), verify: this.verify, gate: this.gate ? this.gate() : null,
             slaves: this.slaves.map((s) => Object.assign({}, s, { driven: this.driven.has(S.key(s)), failures: this.failures.get(S.key(s)) || 0 })),
             driven: this.driven.size, scene: Object.assign({}, this.scene), capabilities: this.capabilities,
             stats: Object.assign({}, this.stats), scheduler: this.scheduler.status(), lastError: this.lastError, history: this.history.slice(-12),

@@ -1,68 +1,31 @@
 # Changelog
 
-## 0.5.3 (2026-11-13)
+## 0.6.0 (2026-11-14)
 
-Two write methods with one writer, modes in the car's active colours, selectors that open at 100 %, a moving
-cabin preview for every mode, and a door handback that is always one command. The animated modes themselves
-(their colours, timing, frames and whole-bus writes) are 0.5.1's, untouched. Everything below runs in simulation
-(209 Node tests, 37 Python tests, the package build and its checks). **Nothing in 0.5.3 has run on the car**:
+Built on 0.5.1's lighting code (with 0.5.2's icon). **0.5.3 is withdrawn**: its targeted still colours, "active
+colours" for the modes and mode previews are not in this version. Four changes, all in simulation only (198 Node
+tests, 37 Python tests, the package build and its checks). **Nothing in 0.6.0 has run on the car**:
 [UNVERIFIED.md](UNVERIFIED.md).
 
-### Still colours are written to each module; animations keep the whole bus
-
-- **Single Colour, Dual Colour and Zones** are written with one `2E DA5E` / `2E E3D1` per module, to that
-  module's own NAD (`LightingController._writeTargeted`): the write verified on the car on 2026-11-04. NAD 0 is
-  never used for a still colour, whatever *How animations are written* says.
-- **Only what changes is written.** A still colour applied over a still colour writes the modules whose colour
-  or brightness differs (and those due for renewal): changing the upper colour of Dual writes the upper modules
-  and leaves the lower ones alone; an unchanged Apply sends nothing. Before, every Apply rewrote everything.
-- **Rainbow, Smooth Fade, Breathing, Colour Wave, Welcome Sweep and Sport Pulse** go out as before
-  (`_writeWholeBus`: NAD 0 for the colour most lights of a bus want, then the exceptions, frame by frame).
-- **One writer.** Both methods feed the same scheduler (one request at a time). `apply()` cancels the frame loop
-  and any queued frame before a still colour is written, and the keep-alive before the first frame; the first
-  still colour after an animation is written to all 19 modules in full. Diagnostics has a *Writer* row.
-- **Handing back is unchanged**: Restore OEM, the car left, the factory lighting off and the app stopping are
-  one NAD 0 release a bus.
-- The read-back after a still Apply now runs only with its setting on or after an unanswered write (every
-  module has answered for its own write). A module that misses a whole-bus *release* is still found by the
-  read-back after a handback, released singly, and from then on gets its own write after each whole-bus frame.
-
-### An open door: always one release, to that door's line
-
-- A partial handback (an open door's contour line, a module a new program leaves to the car) is **never** a
-  NAD 0 release: one release per module, at its own address, also when nothing else of ours is lit on its bus.
-  Only the full handback uses the whole bus.
-
-### Modes use the colours active in the car (`active_colours.js`)
-
-- A mode's upper / lower colours and brightness are, in this order: what the app has applied; with nothing
-  applied, what the body controller last reported for the modules (the probe and the read-backs: the factory
-  colour; no extra request is made for it); else the last applied lighting. Solid takes the upper colour.
-- **An unsent draft is never taken for the car's colour**: turning the wheel changes no mode and no running
-  animation. Welcome and Pulse with nothing applied run in the car's colour and hand the cabin back, instead of
-  ending on the Colours page's draft.
-- The Modes page shows where the colours come from and keeps *Use Colours page* / *Use Dual page* to pick
-  others; those stay through page and mode changes until *Use active* or the next Apply (which makes them the
-  active ones). The hardcoded purple / blue is only what shows when nothing at all is known.
-
-### The selectors open at 100 %
-
-- Opening the Colours page or the Dual page sets the selector's brightness (each Dual side on its own) to 100 %.
-  It is the draft: nothing is sent, nothing is marked changed, and the car keeps its brightness until Apply.
-
-### A moving cabin for every mode (`lighting_preview.js`)
-
-- The Modes page draws the same right-hand-drive cabin as the Colours and Dual pages, lit by
-  `lighting_scene.render()`, the function the car's frames come from: the colours, direction, speed and
-  transitions are the mode's own. A change of mode, speed or colour restarts it at once; Welcome and Pulse play,
-  rest and replay; the applied mode is shown in step with the cabin ("on the car now").
-- It is a picture: the module requires the scene module only, makes no request and has no timer; leaving the
-  page drops its clock.
-
-### Tests
-
-- `tests/node/test_v053.js` (15, new). 14 older tests that expected a still colour on NAD 0, or every Apply to
-  rewrite everything, now state the new rule.
+- **Two write settings instead of one.** "Modes (animations): writes to the car" (`txMode`, as before, default
+  whole bus) and the new "Solid / Dual colours: writes to the car" (`txModeStill`, default one write a module).
+  Both offer the same two options as before: whole bus where it saves writes (NAD 0, read back afterwards), or one
+  write a module. The controller picks by what is applied (`LightingController._mode()`); zones and the effects
+  over a still colour follow the still-colour setting. Changing either rebuilds the lighting link, as `txMode`
+  always did, which hands the lights back first.
+- **Custom lighting no longer stops because the app is not on screen.** With no vehicle-state signal, 0.5.x counted
+  the car as "in use" only for 15 minutes after the screen, a door, an indicator or the speed last showed it, and
+  then let the lights lapse. Now lighting that is ON counts as use, so it stays on with the screen closed. The new
+  setting "Car state unknown, app not on screen" (`idleStop`) brings the 15 minutes back. Unchanged: a car that
+  SAYS it is locked or left gets everything released at once; the factory lighting switched off releases; the
+  platform stopping the app releases.
+- **An open door hands its line back to BMW only over a still colour.** While a mode (Rainbow, Smooth Fade,
+  Breathing, Colour Wave, Welcome Sweep, Sport Pulse) runs, an open door changes nothing: its line stays in the
+  animation and its bus is still written whole. Over a still colour the door's line is released as before, with
+  ONE release to that module. A partial handback is now never a whole-bus release, even when no other module of
+  that bus is lit (`_release`).
+- **Handing everything back is unchanged**: one NAD 0 release for each LIN bus (two writes for the cabin), with
+  either write setting, single releases only after the car has refused a NAD 0 write.
 
 ## 0.5.2 (2026-11-13)
 
